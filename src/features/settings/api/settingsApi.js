@@ -69,3 +69,14 @@ export function fetchAdmins(params) {
 export function updateAdminRole(id, data) {
   return backendApi.put(`${ADMIN}/admins/${id}`, data);
 }
+
+/**
+ * 관리자 계정 신규 등록 (2026-04-14 추가).
+ *
+ * 기존 일반 사용자를 관리자로 승격시킨다.
+ * @param {{ userId?: string, email?: string, adminRole: string }} data
+ *   userId 또는 email 중 하나는 필수. adminRole 은 AdminRole enum 허용값.
+ */
+export function createAdmin(data) {
+  return backendApi.post(`${ADMIN}/admins`, data);
+}

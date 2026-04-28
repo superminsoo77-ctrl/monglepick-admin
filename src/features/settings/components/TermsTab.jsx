@@ -6,6 +6,12 @@
  * - 등록/수정 모달 (title, content, type, version, isRequired)
  * - 삭제 확인 다이얼로그
  * - 페이지네이션 (10건/페이지)
+ *
+ * Phase G P1 (2026-04-23):
+ * - ?modal=create 쿼리 시 약관 등록 모달 자동 오픈
+ * - AI 어시스턴트 draft(term_draft) → 모달 초기값 주입
+ *   draft 필드: type, version, content
+ * - 모달 상단 AiPrefillBanner 노출 (draft && isAiGenerated 조건)
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -13,6 +19,9 @@ import styled from 'styled-components';
 import { MdAdd, MdEdit, MdDelete, MdRefresh } from 'react-icons/md';
 import { fetchTerms, createTerm, updateTerm, deleteTerm } from '../api/settingsApi';
 import StatusBadge from '@/shared/components/StatusBadge';
+import { useQueryParams } from '@/shared/hooks/useQueryParams';
+import { useAiPrefill } from '@/shared/hooks/useAiPrefill';
+import AiPrefillBanner from '@/shared/components/AiPrefillBanner';
 
 /** 약관 유형 옵션 */
 const TERM_TYPES = [
@@ -48,6 +57,15 @@ function formatDate(dateStr) {
 }
 
 export default function TermsTab() {
+  /* ── URL 쿼리파라미터 / AI prefill ── */
+  /**
+   * ?modal=create → 약관 등록 모달 자동 오픈.
+   * AI 어시스턴트가 draft(term_draft)를 location.state 에 심어두면
+   * 모달 초기값(type, version, content)으로 주입한다.
+   */
+  const { modal: queryModal } = useQueryParams();
+  const { draft, bannerText } = useAiPrefill();
+
   /* ── 목록 상태 ── */
   const [terms, setTerms] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -87,6 +105,38 @@ export default function TermsTab() {
   useEffect(() => {
     loadTerms();
   }, [loadTerms]);
+
+  /**
+   * 쿼리파라미터 자동 모달 오픈 처리.
+   *
+   * - ?modal=create : 약관 등록 모달을 즉시 오픈.
+   *   draft(term_draft)가 있으면 type/version/content 폼 초기값으로 주입.
+   *   draft.type 이 TERM_TYPES 에 없는 값이면 INITIAL_FORM 기본값(TERMS_OF_SERVICE) 사용.
+   *
+   * 이미 모달이 열려 있으면 중복 실행 방지.
+   */
+  useEffect(() => {
+    if (!queryModal || modalOpen) return;
+
+    if (queryModal === 'create') {
+      const validTypes = TERM_TYPES.map((t) => t.value);
+      const mappedType = draft?.type && validTypes.includes(draft.type)
+        ? draft.type
+        : INITIAL_FORM.type;
+      const prefill = draft
+        ? {
+            ...INITIAL_FORM,
+            type:    mappedType,
+            version: draft.version ?? INITIAL_FORM.version,
+            content: draft.content ?? INITIAL_FORM.content,
+          }
+        : INITIAL_FORM;
+      setEditTarget(null);
+      setForm(prefill);
+      setModalOpen(true);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryModal]);
 
   /* ── 모달 열기 (신규 등록) ── */
   function openCreateModal() {
@@ -292,6 +342,9 @@ export default function TermsTab() {
             </ModalHeader>
 
             <ModalForm onSubmit={handleFormSubmit}>
+              {/* ── AI 어시스턴트 prefill 안내 배너 (draft 가 있을 때만 노출) ── */}
+              {bannerText && <AiPrefillBanner text={bannerText} />}
+
               {/* 제목 */}
               <FormRow>
                 <Label>제목 *</Label>

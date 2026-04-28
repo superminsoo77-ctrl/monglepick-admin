@@ -7,6 +7,12 @@
  * - 등록/수정 모달 (title, category, content, displayOrder)
  * - 삭제 확인 다이얼로그
  * - 페이지네이션
+ *
+ * Phase G P1 (2026-04-23):
+ * - ?modal=create 쿼리 시 도움말 등록 모달 자동 오픈
+ * - AI 어시스턴트 draft(help_article_draft) → 모달 초기값 주입
+ *   draft 필드: title, category, content
+ * - 모달 상단 AiPrefillBanner 노출 (draft && isAiGenerated 조건)
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -19,37 +25,58 @@ import {
   deleteHelpArticle,
 } from '../api/supportApi';
 import StatusBadge from '@/shared/components/StatusBadge';
+import { useQueryParams } from '@/shared/hooks/useQueryParams';
+import { useAiPrefill } from '@/shared/hooks/useAiPrefill';
+import AiPrefillBanner from '@/shared/components/AiPrefillBanner';
 
-/** 도움말 카테고리 옵션 */
+/**
+ * 도움말 카테고리 옵션.
+ *
+ * <p>도움말 엔티티({@code SupportHelpArticle.category})도 FAQ와 동일한
+ * {@code SupportCategory} enum 을 공유한다. 따라서 허용 값은 아래 6종 으로 고정된다:
+ * GENERAL / ACCOUNT / CHAT / RECOMMENDATION / COMMUNITY / PAYMENT.</p>
+ */
 const CATEGORIES = [
   { value: '', label: '전체' },
-  { value: 'GETTING_STARTED', label: '시작하기' },
-  { value: 'ACCOUNT', label: '계정 관리' },
-  { value: 'CHAT', label: 'AI 채팅' },
-  { value: 'PAYMENT', label: '결제/포인트' },
+  { value: 'GENERAL', label: '일반' },
+  { value: 'ACCOUNT', label: '계정' },
+  { value: 'CHAT', label: '채팅' },
+  { value: 'RECOMMENDATION', label: '추천' },
   { value: 'COMMUNITY', label: '커뮤니티' },
-  { value: 'ETC', label: '기타' },
+  { value: 'PAYMENT', label: '결제' },
 ];
 
-/** 카테고리 한국어 라벨 매핑 */
+/** 카테고리 API 값 → 한국어 라벨 매핑 (목록 표시용) */
 const CATEGORY_LABELS = {
-  GETTING_STARTED: '시작하기',
-  ACCOUNT: '계정 관리',
-  CHAT: 'AI 채팅',
-  PAYMENT: '결제/포인트',
+  GENERAL: '일반',
+  ACCOUNT: '계정',
+  CHAT: '채팅',
+  RECOMMENDATION: '추천',
   COMMUNITY: '커뮤니티',
-  ETC: '기타',
+  PAYMENT: '결제',
 };
 
-/** 등록/수정 폼 초기값 */
+/**
+ * 등록/수정 폼 초기값.
+ * 과거 'GETTING_STARTED' 기본값으로 인해 모든 신규 도움말 등록이 400 으로 실패하던 버그 수정.
+ */
 const INITIAL_FORM = {
   title: '',
-  category: 'GETTING_STARTED',
+  category: 'GENERAL',
   content: '',
   displayOrder: 0,
 };
 
 export default function HelpTab() {
+  /* ── URL 쿼리파라미터 / AI prefill ── */
+  /**
+   * ?modal=create → 도움말 등록 모달 자동 오픈.
+   * AI 어시스턴트가 draft(help_article_draft)를 location.state 에 심어두면
+   * 모달 초기값(title, category, content)으로 주입한다.
+   */
+  const { modal: queryModal } = useQueryParams();
+  const { draft, bannerText } = useAiPrefill();
+
   /* ── 목록 상태 ── */
   const [articles, setArticles] = useState([]);
   const [total, setTotal] = useState(0);
@@ -90,6 +117,34 @@ export default function HelpTab() {
 
   useEffect(() => { loadArticles(); }, [loadArticles]);
 
+  /**
+   * 쿼리파라미터 자동 모달 오픈 처리.
+   *
+   * - ?modal=create : 도움말 등록 모달을 즉시 오픈.
+   *   draft(help_article_draft)가 있으면 title/category/content 폼 초기값으로 주입.
+   *
+   * 이미 모달이 열려 있으면 중복 실행 방지.
+   */
+  useEffect(() => {
+    if (!queryModal || modalOpen) return;
+
+    if (queryModal === 'create') {
+      /* draft 필드명(camelCase): title, category, content */
+      const prefill = draft
+        ? {
+            ...INITIAL_FORM,
+            title:    draft.title    ?? INITIAL_FORM.title,
+            category: draft.category ?? INITIAL_FORM.category,
+            content:  draft.content  ?? INITIAL_FORM.content,
+          }
+        : INITIAL_FORM;
+      setEditTarget(null);
+      setForm(prefill);
+      setModalOpen(true);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryModal]);
+
   /** 카테고리 필터 변경 — 첫 페이지로 리셋 */
   function handleCategoryChange(value) {
     setFilterCategory(value);
@@ -108,7 +163,8 @@ export default function HelpTab() {
     setEditTarget(article);
     setForm({
       title: article.title ?? '',
-      category: article.category ?? 'GETTING_STARTED',
+      /* Backend SupportCategory enum 과 일치해야 한다. 기본값은 INITIAL_FORM 과 통일. */
+      category: article.category ?? 'GENERAL',
       content: article.content ?? '',
       displayOrder: article.displayOrder ?? 0,
     });
@@ -264,6 +320,9 @@ export default function HelpTab() {
             </ModalHeader>
 
             <ModalForm onSubmit={handleFormSubmit}>
+              {/* ── AI 어시스턴트 prefill 안내 배너 (draft 가 있을 때만 노출) ── */}
+              {bannerText && <AiPrefillBanner text={bannerText} />}
+
               <FormRow>
                 <Label>제목 *</Label>
                 <Input

@@ -1,8 +1,17 @@
 /**
  * 환불 처리 모달 컴포넌트.
  *
- * 전액/부분 환불 선택 후 사유를 입력하고 refundOrder API를 호출한다.
- * 부분 환불 시 금액 입력 필드가 활성화되며 최대값은 원래 결제 금액으로 제한된다.
+ * 관리자가 결제 주문을 환불 처리할 때 사용한다.
+ * 환불 사유를 입력하고 refundOrder API를 호출하면 전액 환불로 처리된다.
+ *
+ * 2026-04-09 변경: 부분 환불 UI 제거 (P0-1 데이터 무결성 이슈 대응)
+ *   - 기존에는 "전액/부분" 라디오 + 금액 입력 필드가 있었으나,
+ *     백엔드 `PaymentService.refundOrder(orderId, userId, reason)` 시그니처에는
+ *     amount 파라미터가 없어서 부분 금액을 입력해도 항상 전액 환불로 처리되었다.
+ *   - UI가 "부분 환불 성공"으로 표시되지만 실제로는 전액이 환불되는
+ *     심각한 오인 피드백을 유발했으므로 부분 환불 옵션을 일괄 제거한다.
+ *   - 도메인 레이어에 부분 환불(amount 파라미터 + Toss 부분취소 +
+ *     포인트 비례 회수 + 재환불 정책)을 추가하는 작업은 별도 이슈로 분리한다.
  *
  * @param {Object}   props
  * @param {boolean}  props.isOpen    - 모달 열림 여부
@@ -15,60 +24,43 @@ import { useState, useEffect } from 'react';
 import styled from 'styled-components';
 import { MdClose } from 'react-icons/md';
 import { refundOrder } from '../api/paymentApi';
-
-/** 환불 유형 옵션 */
-const REFUND_TYPES = [
-  { value: 'full', label: '전액 환불' },
-  { value: 'partial', label: '부분 환불' },
-];
+import { useAiPrefill } from '@/shared/hooks/useAiPrefill';
+import AiPrefillBanner from '@/shared/components/AiPrefillBanner';
 
 export default function RefundModal({ isOpen, order, onClose, onSuccess }) {
-  const [refundType, setRefundType] = useState('full');
-  const [amount, setAmount] = useState('');
+  /* v3 Phase G: AI Assistant 가 state.draft 에 reason 을 실어 보낸 경우 초기값으로 주입 */
+  const { draft: aiDraft, isAiGenerated } = useAiPrefill();
+
+  /* 환불 사유 입력값 */
   const [reason, setReason] = useState('');
+  /* API 호출 중 로딩 상태 */
   const [loading, setLoading] = useState(false);
+  /* 사용자에게 노출할 에러 메시지 */
   const [error, setError] = useState(null);
 
   /* 모달 열릴 때마다 폼 초기화 */
   useEffect(() => {
     if (isOpen) {
-      setRefundType('full');
-      setAmount('');
-      setReason('');
+      setReason(aiDraft?.reason ?? '');
       setError(null);
     }
-  }, [isOpen]);
+  }, [isOpen, aiDraft]);
 
   /* 모달 닫혀있으면 렌더링 생략 */
   if (!isOpen || !order) return null;
 
-  /** 환불 금액 유효성 검사 */
-  function getAmountError() {
-    if (refundType !== 'partial') return null;
-    const num = Number(amount);
-    if (!amount || isNaN(num) || num <= 0) return '환불 금액을 입력해주세요.';
-    if (num > order.amount) return `최대 ${order.amount.toLocaleString()}원까지 가능합니다.`;
-    return null;
-  }
-
-  /** 환불 처리 제출 */
+  /** 환불 처리 제출 — 백엔드는 항상 전액 환불 */
   async function handleSubmit(e) {
     e.preventDefault();
 
-    const amountError = getAmountError();
-    if (amountError) {
-      setError(amountError);
-      return;
-    }
     if (!reason.trim()) {
       setError('환불 사유를 입력해주세요.');
       return;
     }
 
-    const payload = {
-      reason: reason.trim(),
-      ...(refundType === 'partial' && { amount: Number(amount) }),
-    };
+    /* 백엔드 refundOrder(orderId, userId, reason) 시그니처에 amount 가 없으므로
+     * reason 만 전달한다. 부분 환불은 별도 이슈로 지원 예정. */
+    const payload = { reason: reason.trim() };
 
     try {
       setLoading(true);
@@ -95,6 +87,9 @@ export default function RefundModal({ isOpen, order, onClose, onSuccess }) {
           </CloseButton>
         </ModalHeader>
 
+        {/* v3 Phase G: AI 프리필 배너 — state.draft 로 진입했을 때만 노출 */}
+        {isAiGenerated && aiDraft && <AiPrefillBanner />}
+
         {/* 주문 정보 요약 */}
         <OrderSummary>
           <SummaryRow>
@@ -113,52 +108,17 @@ export default function RefundModal({ isOpen, order, onClose, onSuccess }) {
           )}
         </OrderSummary>
 
+        {/* 전액 환불 안내 — 부분 환불 미지원 (2026-04-09) */}
+        <FullRefundNotice>
+          이 요청은 <strong>전액 환불</strong>로 처리됩니다.
+          <br />
+          POINT_PACK 주문은 지급된 포인트도 자동으로 회수됩니다.
+          <br />
+          <NoticeSub>※ 부분 환불은 현재 지원되지 않습니다.</NoticeSub>
+        </FullRefundNotice>
+
         {/* 환불 폼 */}
         <form onSubmit={handleSubmit}>
-          {/* 환불 유형 선택 */}
-          <FormGroup>
-            <FormLabel>환불 유형</FormLabel>
-            <RadioGroup>
-              {REFUND_TYPES.map(({ value, label }) => (
-                <RadioLabel key={value}>
-                  <input
-                    type="radio"
-                    name="refundType"
-                    value={value}
-                    checked={refundType === value}
-                    onChange={() => {
-                      setRefundType(value);
-                      setAmount('');
-                      setError(null);
-                    }}
-                  />
-                  {label}
-                </RadioLabel>
-              ))}
-            </RadioGroup>
-          </FormGroup>
-
-          {/* 부분 환불 금액 입력 */}
-          {refundType === 'partial' && (
-            <FormGroup>
-              <FormLabel>
-                환불 금액
-                <MaxHint>최대 {order.amount?.toLocaleString()}원</MaxHint>
-              </FormLabel>
-              <Input
-                type="number"
-                min={1}
-                max={order.amount}
-                value={amount}
-                onChange={(e) => {
-                  setAmount(e.target.value);
-                  setError(null);
-                }}
-                placeholder="환불할 금액 입력"
-              />
-            </FormGroup>
-          )}
-
           {/* 환불 사유 */}
           <FormGroup>
             <FormLabel>환불 사유 <RequiredMark>*</RequiredMark></FormLabel>
@@ -184,7 +144,7 @@ export default function RefundModal({ isOpen, order, onClose, onSuccess }) {
               취소
             </CancelButton>
             <ConfirmButton type="submit" disabled={loading}>
-              {loading ? '처리 중...' : '환불 확인'}
+              {loading ? '처리 중...' : '전액 환불'}
             </ConfirmButton>
           </ButtonRow>
         </form>
@@ -289,60 +249,37 @@ const FormLabel = styled.label`
   margin-bottom: ${({ theme }) => theme.spacing.sm};
 `;
 
-const MaxHint = styled.span`
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
-  font-weight: ${({ theme }) => theme.fontWeights.normal};
-  margin-left: auto;
-`;
-
 const RequiredMark = styled.span`
   color: ${({ theme }) => theme.colors.error};
 `;
 
-const RadioGroup = styled.div`
-  display: flex;
-  gap: ${({ theme }) => theme.spacing.xl};
-`;
-
-const RadioLabel = styled.label`
-  display: flex;
-  align-items: center;
-  gap: ${({ theme }) => theme.spacing.sm};
-  font-size: ${({ theme }) => theme.fontSizes.md};
-  color: ${({ theme }) => theme.colors.textPrimary};
-  cursor: pointer;
-
-  input[type='radio'] {
-    accent-color: ${({ theme }) => theme.colors.primary};
-    width: 16px;
-    height: 16px;
-    cursor: pointer;
-  }
-`;
-
-const Input = styled.input`
-  width: 100%;
-  height: 36px;
-  padding: 0 ${({ theme }) => theme.spacing.md};
-  border: 1px solid ${({ theme }) => theme.colors.border};
+/**
+ * 전액 환불 안내 박스.
+ * 부분 환불 UI 제거(2026-04-09)에 따른 사용자 오인 차단용 안내.
+ * 경고 톤의 옅은 배경 + 좌측 컬러 바로 주의를 끌되 파괴적 느낌은 배제한다.
+ */
+const FullRefundNotice = styled.div`
+  background: ${({ theme }) => theme.colors.bgHover};
+  border-left: 3px solid ${({ theme }) => theme.colors.error};
   border-radius: 6px;
-  font-size: ${({ theme }) => theme.fontSizes.md};
+  padding: ${({ theme }) => theme.spacing.md} ${({ theme }) => theme.spacing.lg};
+  margin-bottom: ${({ theme }) => theme.spacing.xl};
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  line-height: 1.6;
   color: ${({ theme }) => theme.colors.textPrimary};
-  background: ${({ theme }) => theme.colors.bgCard};
-  transition: border-color ${({ theme }) => theme.transitions.fast};
 
-  &:focus {
-    outline: none;
-    border-color: ${({ theme }) => theme.colors.primary};
+  strong {
+    font-weight: ${({ theme }) => theme.fontWeights.semibold};
+    color: ${({ theme }) => theme.colors.error};
   }
+`;
 
-  /* 숫자 스피너 제거 */
-  &::-webkit-outer-spin-button,
-  &::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-  }
+/** 안내 박스 하단 보조 문구(부분 환불 미지원 고지) */
+const NoticeSub = styled.span`
+  display: inline-block;
+  margin-top: ${({ theme }) => theme.spacing.xs};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textMuted};
 `;
 
 const Textarea = styled.textarea`

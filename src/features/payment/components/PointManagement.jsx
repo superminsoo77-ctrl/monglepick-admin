@@ -3,56 +3,87 @@
  *
  * 두 영역으로 구성된다:
  * 1. 수동 지급/차감 폼 — 관리자가 특정 사용자에게 포인트를 직접 지급하거나 차감
- * 2. 사용자 포인트 이력 조회 — userId 입력 후 변동 이력 테이블 표시 (페이징 포함)
+ * 2. 사용자 포인트 이력 조회 — UserSearchPicker 로 사용자 선택 후 이력 테이블 표시
+ *
+ * 2026-04-14 변경:
+ *  - 백엔드 DTO(PointHistoryItem) 필드 정합화.
+ *    기존: item.id / item.type / item.amount / item.balance / item.reason / item.adminId
+ *    실제: historyId / pointType / pointChange / pointAfter / description / actionType
+ *  - UUID 직접 입력 대신 이메일/닉네임 검색(UserSearchPicker) 사용
+ *  - 수동 지급/차감 폼도 UserSearchPicker 로 사용자 지정
  *
  * @module PointManagement
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import styled from 'styled-components';
-import { MdSearch } from 'react-icons/md';
 import { manualPointTransfer, fetchPointHistory } from '../api/paymentApi';
 import StatusBadge from '@/shared/components/StatusBadge';
+import UserSearchPicker from '@/shared/components/UserSearchPicker';
 
-/** 포인트 변동 유형 → StatusBadge 매핑 */
+/**
+ * 1회 수동 포인트 지급/차감 최대 금액 (1억 P).
+ *
+ * 백엔드 `AdminManualPointRequest#amount` 의 `@Max(100,000,000)` 와 동기화되어야 한다.
+ * 1P = 10원 기준으로 10억원 상당이며, 서버의 `Integer` 타입 범위 오버플로우와
+ * 오타로 인한 비현실적 금액 입력을 사전에 차단하기 위한 상한.
+ */
+const MAX_MANUAL_POINT = 100_000_000;
+
+/**
+ * 포인트 변동 유형 → StatusBadge 매핑.
+ * 백엔드 `pointType` 값은 소문자 (earn/spend/refund/revoke/attendance 등) 이므로
+ * 대소문자 무관 매핑을 위해 .toLowerCase() 적용.
+ */
 const POINT_TYPE_MAP = {
-  EARN:        { status: 'success', label: '지급' },
-  DEDUCT:      { status: 'error',   label: '차감' },
-  ATTENDANCE:  { status: 'info',    label: '출석' },
-  PURCHASE:    { status: 'warning', label: '구매' },
-  REFUND:      { status: 'default', label: '환불' },
-  EXPIRATION:  { status: 'default', label: '만료' },
+  earn:       { status: 'success', label: '적립' },
+  spend:      { status: 'error',   label: '차감' },
+  refund:     { status: 'default', label: '환불' },
+  revoke:     { status: 'default', label: '회수' },
+  attendance: { status: 'info',    label: '출석' },
+  purchase:   { status: 'warning', label: '구매' },
+  expiration: { status: 'default', label: '만료' },
+  manual:     { status: 'info',    label: '수동' },
 };
+
+function resolveTypeBadge(pointType) {
+  if (!pointType) return { status: 'default', label: '-' };
+  const key = String(pointType).toLowerCase();
+  return POINT_TYPE_MAP[key] ?? { status: 'default', label: pointType };
+}
 
 /** 날짜 포맷 (YYYY.MM.DD HH:MM) */
 function formatDate(dateStr) {
   if (!dateStr) return '-';
   const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return '-';
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}.${pad(d.getMonth() + 1)}.${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** 포인트 부호 표시 (+/-) */
-function formatPointDelta(type, amount) {
-  const isDeduct = type === 'DEDUCT' || type === 'PURCHASE' || type === 'EXPIRATION';
-  return isDeduct ? `-${amount?.toLocaleString()}` : `+${amount?.toLocaleString()}`;
+/** 포인트 부호 표시 — 백엔드 pointChange 는 음수/양수 모두 가능 */
+function formatPointChange(change) {
+  if (change == null) return '-';
+  const n = Number(change);
+  if (Number.isNaN(n)) return '-';
+  const sign = n > 0 ? '+' : (n < 0 ? '-' : '');
+  return `${sign}${Math.abs(n).toLocaleString()}`;
 }
 
 export default function PointManagement() {
   /* ── 수동 지급/차감 폼 상태 ── */
+  const [transferUser, setTransferUser] = useState(null);
   const [transferForm, setTransferForm] = useState({
-    userId: '',
     amount: '',
     reason: '',
-    type: 'EARN', // EARN | DEDUCT
+    type: 'EARN',
   });
   const [transferLoading, setTransferLoading] = useState(false);
   const [transferError, setTransferError] = useState(null);
   const [transferSuccess, setTransferSuccess] = useState(null);
 
   /* ── 이력 조회 상태 ── */
-  const [historyUserId, setHistoryUserId] = useState('');
-  const [historyInput, setHistoryInput] = useState(''); // 입력 중인 값
+  const [historyUser, setHistoryUser] = useState(null);
   const [history, setHistory] = useState([]);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historyPages, setHistoryPages] = useState(0);
@@ -60,6 +91,14 @@ export default function PointManagement() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(null);
   const HISTORY_PAGE_SIZE = 20;
+
+  /* 이력 날짜 범위 필터 — Input(타이핑 중) / Filter(확정) 분리.
+   * "기간 적용" 버튼 클릭 시에만 Filter 로 커밋되어 재조회가 유발된다.
+   * (2026-04-23 추가, AuditLogTab 패턴 재사용) */
+  const [fromDateInput, setFromDateInput] = useState('');
+  const [toDateInput, setToDateInput] = useState('');
+  const [fromDateFilter, setFromDateFilter] = useState('');
+  const [toDateFilter, setToDateFilter] = useState('');
 
   /* ── 수동 지급/차감 폼 핸들러 ── */
 
@@ -73,15 +112,29 @@ export default function PointManagement() {
   async function handleTransferSubmit(e) {
     e.preventDefault();
 
-    const { userId, amount, reason, type } = transferForm;
-
-    if (!userId.trim()) {
-      setTransferError('사용자 ID를 입력해주세요.');
+    if (!transferUser?.userId) {
+      setTransferError('사용자를 선택해주세요. (이메일 또는 닉네임으로 검색)');
       return;
     }
+    const { amount, reason, type } = transferForm;
     const amountNum = Number(amount);
-    if (!amount || isNaN(amountNum) || amountNum <= 0) {
+    if (!amount || Number.isNaN(amountNum) || amountNum <= 0) {
       setTransferError('포인트 금액을 올바르게 입력해주세요.');
+      return;
+    }
+    /*
+     * 상한 검증 — 백엔드 AdminManualPointRequest#amount 의 @Max(100,000,000) 와 동기화.
+     * 정수가 아닌 값/범위 초과 값을 서버까지 보내지 않고 즉시 차단하여
+     * 실수로 10조 같은 비현실적 수치를 입력하는 것을 방지한다.
+     */
+    if (!Number.isInteger(amountNum)) {
+      setTransferError('포인트 금액은 정수로 입력해주세요.');
+      return;
+    }
+    if (amountNum > MAX_MANUAL_POINT) {
+      setTransferError(
+        `1회 ${type === 'EARN' ? '지급' : '차감'} 가능한 최대 금액은 ${MAX_MANUAL_POINT.toLocaleString()}P 입니다.`
+      );
       return;
     }
     if (!reason.trim()) {
@@ -93,26 +146,27 @@ export default function PointManagement() {
       setTransferLoading(true);
       setTransferError(null);
       const result = await manualPointTransfer({
-        userId: userId.trim(),
+        userId: transferUser.userId,
         amount: amountNum,
         reason: reason.trim(),
         type,
       });
 
       const actionLabel = type === 'EARN' ? '지급' : '차감';
-      const balanceMsg = result?.balance != null
-        ? ` (현재 잔액: ${result.balance.toLocaleString()}P)`
+      /* 백엔드 AdminManualPointResponse 필드명은 newBalance */
+      const balance = result?.newBalance ?? result?.balance;
+      const balanceMsg = balance != null
+        ? ` (현재 잔액: ${Number(balance).toLocaleString()}P)`
         : '';
       setTransferSuccess(
         `${amountNum.toLocaleString()}P ${actionLabel} 완료${balanceMsg}`
       );
 
-      /* 폼 초기화 (userId 유지, 이력 자동 갱신) */
-      setTransferForm((prev) => ({ ...prev, amount: '', reason: '' }));
+      setTransferForm({ amount: '', reason: '', type });
 
-      /* 이력이 해당 사용자 조회 중이면 자동 갱신 */
-      if (historyUserId === userId.trim()) {
-        loadHistory(userId.trim(), 0);
+      /* 동일 사용자 이력 탭을 보고 있으면 자동 갱신 */
+      if (historyUser?.userId === transferUser.userId) {
+        loadHistory(transferUser.userId, 0);
       }
     } catch (err) {
       setTransferError(err.message || '처리 중 오류가 발생했습니다.');
@@ -123,13 +177,32 @@ export default function PointManagement() {
 
   /* ── 이력 조회 ── */
 
-  /** 이력 API 호출 */
+  /**
+   * datetime-local("2026-04-01T14:30") → ISO-8601 초 단위("2026-04-01T14:30:00") 변환.
+   * 빈 문자열이면 undefined → 요청 파라미터에서 자동 제외.
+   */
+  function toIsoOrUndefined(dtLocal) {
+    if (!dtLocal) return undefined;
+    return dtLocal.length === 16 ? `${dtLocal}:00` : dtLocal;
+  }
+
+  /**
+   * 이력 API 호출.
+   * 확정된 날짜 필터(fromDateFilter/toDateFilter)를 클로저로 캡쳐해 함께 전송한다.
+   * useCallback deps 에 두 필터를 포함시켜, 필터 변경 시 새 인스턴스가 생성되고
+   * 아래 useEffect 가 동일 사용자에 대해 재조회를 트리거한다.
+   */
   const loadHistory = useCallback(async (uid, pg = 0) => {
     if (!uid) return;
     try {
       setHistoryLoading(true);
       setHistoryError(null);
-      const result = await fetchPointHistory(uid, { page: pg, size: HISTORY_PAGE_SIZE });
+      const params = { page: pg, size: HISTORY_PAGE_SIZE };
+      const fromIso = toIsoOrUndefined(fromDateFilter);
+      const toIso   = toIsoOrUndefined(toDateFilter);
+      if (fromIso) params.fromDate = fromIso;
+      if (toIso)   params.toDate   = toIso;
+      const result = await fetchPointHistory(uid, params);
       setHistory(result?.content ?? []);
       setHistoryTotal(result?.totalElements ?? 0);
       setHistoryPages(result?.totalPages ?? 0);
@@ -140,16 +213,49 @@ export default function PointManagement() {
     } finally {
       setHistoryLoading(false);
     }
-  }, []);
+  }, [fromDateFilter, toDateFilter]);
 
-  /** 이력 조회 폼 제출 */
-  function handleHistorySearch(e) {
-    e.preventDefault();
-    const uid = historyInput.trim();
-    if (!uid) return;
-    setHistoryUserId(uid);
-    loadHistory(uid, 0);
+  /**
+   * 날짜 필터 확정 값이 바뀌면 현재 선택된 사용자의 이력을 첫 페이지부터 재조회.
+   * 사용자 선택 변경은 handleHistoryUserChange 에서 직접 호출하므로 여기서는
+   * `fromDateFilter` / `toDateFilter` 만 deps 로 두면 충분하다.
+   */
+  useEffect(() => {
+    if (historyUser?.userId) {
+      loadHistory(historyUser.userId, 0);
+    }
+    // historyUser 는 사용자 선택 핸들러에서 직접 loadHistory 를 호출하므로 deps 에서 제외.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fromDateFilter, toDateFilter]);
+
+  /** 이력 픽커 사용자 선택 변경 */
+  function handleHistoryUserChange(user) {
+    setHistoryUser(user);
+    if (user?.userId) {
+      loadHistory(user.userId, 0);
+    } else {
+      setHistory([]);
+      setHistoryTotal(0);
+      setHistoryPages(0);
+    }
   }
+
+  /** 날짜 필터 적용 — 타이핑 값을 확정 Filter 로 커밋 (useEffect 가 재조회 트리거) */
+  function handleDateApply(e) {
+    e.preventDefault();
+    setFromDateFilter(fromDateInput);
+    setToDateFilter(toDateInput);
+  }
+
+  /** 날짜 필터 초기화 */
+  function handleDateReset() {
+    setFromDateInput('');
+    setToDateInput('');
+    setFromDateFilter('');
+    setToDateFilter('');
+  }
+
+  const hasDateFilter = !!fromDateFilter || !!toDateFilter;
 
   return (
     <Wrapper>
@@ -183,14 +289,14 @@ export default function PointManagement() {
                 </TypeToggle>
               </FormGroup>
 
-              {/* 사용자 ID */}
-              <FormGroup>
-                <FormLabel>사용자 ID <RequiredMark>*</RequiredMark></FormLabel>
-                <Input
-                  type="text"
-                  value={transferForm.userId}
-                  onChange={(e) => handleTransferChange('userId', e.target.value)}
-                  placeholder="user_xxxxxxxx"
+              {/* 사용자 선택 — 이메일/닉네임 검색 */}
+              <FormGroup $full>
+                <FormLabel>사용자 <RequiredMark>*</RequiredMark></FormLabel>
+                <UserSearchPicker
+                  selectedUser={transferUser}
+                  onChange={setTransferUser}
+                  placeholder="이메일 또는 닉네임으로 검색"
+                  disabled={transferLoading}
                 />
               </FormGroup>
 
@@ -201,9 +307,11 @@ export default function PointManagement() {
                   <Input
                     type="number"
                     min={1}
+                    max={MAX_MANUAL_POINT}
+                    step={1}
                     value={transferForm.amount}
                     onChange={(e) => handleTransferChange('amount', e.target.value)}
-                    placeholder="0"
+                    placeholder={`1 ~ ${MAX_MANUAL_POINT.toLocaleString()}`}
                     $hasUnit
                   />
                   <Unit>P</Unit>
@@ -218,12 +326,11 @@ export default function PointManagement() {
                   value={transferForm.reason}
                   onChange={(e) => handleTransferChange('reason', e.target.value)}
                   placeholder="예: 이벤트 보상, 서비스 장애 보상, 어뷰징 차감..."
-                  maxLength={200}
+                  maxLength={500}
                 />
               </FormGroup>
             </FormGrid>
 
-            {/* 에러 / 성공 메시지 */}
             {transferError && <AlertMsg $type="error">{transferError}</AlertMsg>}
             {transferSuccess && <AlertMsg $type="success">{transferSuccess}</AlertMsg>}
 
@@ -248,26 +355,66 @@ export default function PointManagement() {
       <Section>
         <SectionTitle>포인트 변동 이력 조회</SectionTitle>
 
-        {/* 검색 폼 */}
-        <SearchForm onSubmit={handleHistorySearch}>
-          <SearchInput
-            type="text"
-            value={historyInput}
-            onChange={(e) => setHistoryInput(e.target.value)}
-            placeholder="사용자 ID 입력 후 Enter 또는 조회 버튼"
+        <SearchRow>
+          <SearchLabel>사용자 검색</SearchLabel>
+          <UserSearchPicker
+            selectedUser={historyUser}
+            onChange={handleHistoryUserChange}
+            placeholder="이메일 또는 닉네임으로 검색"
           />
-          <SearchButton type="submit" disabled={historyLoading || !historyInput.trim()}>
-            <MdSearch size={16} />
-            조회
-          </SearchButton>
-        </SearchForm>
+        </SearchRow>
 
-        {/* 이력 테이블 */}
-        {historyUserId && (
+        {/*
+          날짜 범위 필터 (2026-04-23 추가) — 포인트 변동일(createdAt) 기준.
+          사용자를 선택하지 않은 상태에서도 입력은 가능하되, 재조회는
+          사용자가 선택된 경우에만 useEffect 로 트리거된다.
+        */}
+        <DateFilterForm onSubmit={handleDateApply}>
+          <DateFieldWrap>
+            <DateLabel>시작일</DateLabel>
+            <DateInput
+              type="datetime-local"
+              value={fromDateInput}
+              onChange={(e) => setFromDateInput(e.target.value)}
+              max={toDateInput || undefined}
+              title="변동일 시작 (inclusive)"
+            />
+          </DateFieldWrap>
+          <DateFieldWrap>
+            <DateLabel>종료일</DateLabel>
+            <DateInput
+              type="datetime-local"
+              value={toDateInput}
+              onChange={(e) => setToDateInput(e.target.value)}
+              min={fromDateInput || undefined}
+              title="변동일 종료 (exclusive)"
+            />
+          </DateFieldWrap>
+          <ApplyButton type="submit">기간 적용</ApplyButton>
+          {hasDateFilter && (
+            <ResetButton type="button" onClick={handleDateReset}>
+              초기화
+            </ResetButton>
+          )}
+          {hasDateFilter && (
+            <AppliedBadge>
+              적용됨: <strong>
+                {fromDateFilter ? fromDateFilter.replace('T', ' ') : '처음'}
+                {' ~ '}
+                {toDateFilter ? toDateFilter.replace('T', ' ') : '지금'}
+              </strong>
+            </AppliedBadge>
+          )}
+        </DateFilterForm>
+
+        {historyUser && (
           <>
             <HistoryHeader>
               <HistoryUserId>
-                사용자: <strong>{historyUserId}</strong>
+                사용자: <strong>{historyUser.nickname ?? historyUser.email ?? historyUser.userId}</strong>
+                {(historyUser.nickname || historyUser.email) && (
+                  <UserIdSub title={historyUser.userId}> ({historyUser.userId})</UserIdSub>
+                )}
               </HistoryUserId>
               {!historyLoading && (
                 <HistoryCount>{historyTotal.toLocaleString()}건</HistoryCount>
@@ -286,33 +433,37 @@ export default function PointManagement() {
                   <thead>
                     <tr>
                       <Th>유형</Th>
+                      <Th>활동 코드</Th>
                       <Th>변동량</Th>
                       <Th>잔액</Th>
-                      <Th>사유</Th>
-                      <Th>처리자</Th>
+                      <Th>설명</Th>
+                      <Th>참조 ID</Th>
                       <Th>일시</Th>
                     </tr>
                   </thead>
                   <tbody>
                     {history.map((item) => {
-                      const badge = POINT_TYPE_MAP[item.type] ?? {
-                        status: 'default',
-                        label: item.type ?? '-',
-                      };
-                      const delta = formatPointDelta(item.type, item.amount);
-                      const isDelta = item.type === 'EARN' || item.type === 'ATTENDANCE';
+                      const badge = resolveTypeBadge(item.pointType);
+                      const isPositive = Number(item.pointChange) > 0;
 
                       return (
-                        <tr key={item.id}>
+                        <tr key={item.historyId}>
                           <Td>
                             <StatusBadge status={badge.status} label={badge.label} />
                           </Td>
+                          <Td muted>{item.actionType ?? '-'}</Td>
                           <Td>
-                            <DeltaValue $positive={isDelta}>{delta}P</DeltaValue>
+                            <DeltaValue $positive={isPositive}>
+                              {formatPointChange(item.pointChange)}P
+                            </DeltaValue>
                           </Td>
-                          <Td mono>{item.balance?.toLocaleString() ?? '-'}P</Td>
-                          <Td muted>{item.reason ?? '-'}</Td>
-                          <Td muted>{item.adminId ?? '시스템'}</Td>
+                          <Td mono>
+                            {item.pointAfter != null
+                              ? `${Number(item.pointAfter).toLocaleString()}P`
+                              : '-'}
+                          </Td>
+                          <Td muted>{item.description ?? '-'}</Td>
+                          <Td muted mono>{item.referenceId ?? '-'}</Td>
                           <Td mono>{formatDate(item.createdAt)}</Td>
                         </tr>
                       );
@@ -322,18 +473,17 @@ export default function PointManagement() {
               )}
             </TableWrapper>
 
-            {/* 페이징 */}
             {historyPages > 1 && (
               <Pagination>
                 <PageButton
-                  onClick={() => loadHistory(historyUserId, historyPage - 1)}
+                  onClick={() => loadHistory(historyUser.userId, historyPage - 1)}
                   disabled={historyPage === 0 || historyLoading}
                 >
                   이전
                 </PageButton>
                 <PageInfo>{historyPage + 1} / {historyPages}</PageInfo>
                 <PageButton
-                  onClick={() => loadHistory(historyUserId, historyPage + 1)}
+                  onClick={() => loadHistory(historyUser.userId, historyPage + 1)}
                   disabled={historyPage >= historyPages - 1 || historyLoading}
                 >
                   다음
@@ -361,8 +511,6 @@ const SectionTitle = styled.h3`
   margin-bottom: ${({ theme }) => theme.spacing.lg};
 `;
 
-/* ── 지급/차감 폼 ── */
-
 const FormCard = styled.div`
   background: ${({ theme }) => theme.colors.bgCard};
   border: 1px solid ${({ theme }) => theme.colors.border};
@@ -373,7 +521,7 @@ const FormCard = styled.div`
 
 const FormGrid = styled.div`
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: ${({ theme }) => theme.spacing.xl};
 `;
 
@@ -417,10 +565,6 @@ const TypeButton = styled.button`
       ? `color: #ffffff; background: ${theme.colors.success};`
       : `color: #ffffff; background: ${theme.colors.error};`;
   }}
-
-  &:hover:not([data-active='true']) {
-    background: ${({ theme }) => theme.colors.bgHover};
-  }
 `;
 
 const InputWithUnit = styled.div`
@@ -445,7 +589,6 @@ const Input = styled.input`
     border-color: ${({ theme }) => theme.colors.primary};
   }
 
-  /* 숫자 스피너 제거 */
   &::-webkit-outer-spin-button,
   &::-webkit-inner-spin-button {
     -webkit-appearance: none;
@@ -496,24 +639,56 @@ const SubmitButton = styled.button`
   &:disabled { opacity: 0.5; cursor: not-allowed; }
 `;
 
-/* ── 이력 조회 ── */
-
-const SearchForm = styled.form`
+const SearchRow = styled.div`
   display: flex;
+  align-items: center;
   gap: ${({ theme }) => theme.spacing.md};
   margin-bottom: ${({ theme }) => theme.spacing.lg};
+  flex-wrap: wrap;
 `;
 
-const SearchInput = styled.input`
-  flex: 1;
-  max-width: 360px;
-  height: 36px;
-  padding: 0 ${({ theme }) => theme.spacing.md};
+const SearchLabel = styled.span`
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-weight: ${({ theme }) => theme.fontWeights.medium};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  white-space: nowrap;
+`;
+
+/* ── 날짜 범위 필터 (2026-04-23 추가) ── */
+
+const DateFilterForm = styled.form`
+  display: flex;
+  align-items: center;
+  gap: ${({ theme }) => theme.spacing.sm};
+  flex-wrap: wrap;
+  margin-bottom: ${({ theme }) => theme.spacing.lg};
+  padding: ${({ theme }) => theme.spacing.md};
+  background: ${({ theme }) => theme.colors.bgHover};
+  border: 1px solid ${({ theme }) => theme.colors.borderLight};
+  border-radius: ${({ theme }) => theme.layout.cardRadius};
+`;
+
+const DateFieldWrap = styled.label`
+  display: flex;
+  align-items: center;
+  gap: 4px;
+`;
+
+const DateLabel = styled.span`
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textMuted};
+  white-space: nowrap;
+`;
+
+const DateInput = styled.input`
+  height: 32px;
+  padding: 0 8px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: 6px;
-  font-size: ${({ theme }) => theme.fontSizes.md};
+  border-radius: 4px;
+  background: #ffffff;
   color: ${({ theme }) => theme.colors.textPrimary};
-  background: ${({ theme }) => theme.colors.bgCard};
+  font-family: ${({ theme }) => theme.fonts.base};
 
   &:focus {
     outline: none;
@@ -521,21 +696,35 @@ const SearchInput = styled.input`
   }
 `;
 
-const SearchButton = styled.button`
-  display: flex;
-  align-items: center;
-  gap: ${({ theme }) => theme.spacing.xs};
-  height: 36px;
-  padding: 0 ${({ theme }) => theme.spacing.lg};
-  border-radius: 6px;
+const ApplyButton = styled.button`
+  padding: 5px 12px;
   font-size: ${({ theme }) => theme.fontSizes.sm};
-  font-weight: ${({ theme }) => theme.fontWeights.medium};
-  color: #ffffff;
   background: ${({ theme }) => theme.colors.primary};
-  transition: background ${({ theme }) => theme.transitions.fast};
+  color: #fff;
+  border-radius: 4px;
+  font-weight: ${({ theme }) => theme.fontWeights.medium};
+  &:hover { background: ${({ theme }) => theme.colors.primaryHover}; }
+`;
 
-  &:hover:not(:disabled) { background: ${({ theme }) => theme.colors.primaryHover}; }
-  &:disabled { opacity: 0.5; cursor: not-allowed; }
+const ResetButton = styled.button`
+  padding: 5px 10px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: 4px;
+  color: ${({ theme }) => theme.colors.textSecondary};
+  &:hover { background: ${({ theme }) => theme.colors.bgHover}; }
+`;
+
+const AppliedBadge = styled.span`
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  background: ${({ theme }) => theme.colors.primaryLight};
+  color: ${({ theme }) => theme.colors.primary};
+  border-radius: 20px;
+  border: 1px solid ${({ theme }) => theme.colors.primary};
 `;
 
 const HistoryHeader = styled.div`
@@ -543,6 +732,8 @@ const HistoryHeader = styled.div`
   align-items: center;
   justify-content: space-between;
   margin-bottom: ${({ theme }) => theme.spacing.md};
+  flex-wrap: wrap;
+  gap: ${({ theme }) => theme.spacing.sm};
 `;
 
 const HistoryUserId = styled.span`
@@ -551,8 +742,13 @@ const HistoryUserId = styled.span`
 
   strong {
     color: ${({ theme }) => theme.colors.textPrimary};
-    font-family: ${({ theme }) => theme.fonts.mono};
   }
+`;
+
+const UserIdSub = styled.span`
+  color: ${({ theme }) => theme.colors.textMuted};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.mono};
 `;
 
 const HistoryCount = styled.span`
@@ -571,7 +767,7 @@ const TableWrapper = styled.div`
 const Table = styled.table`
   width: 100%;
   border-collapse: collapse;
-  min-width: 600px;
+  min-width: 700px;
 `;
 
 const Th = styled.th`

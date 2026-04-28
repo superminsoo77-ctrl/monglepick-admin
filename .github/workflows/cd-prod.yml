@@ -1,0 +1,269 @@
+# =========================================
+# 몽글픽 Admin Client 운영 배포 워크플로우 (Production CD)
+# =========================================
+# 기준 문서: docs/인프라_배포_가이드.md §6.4 (2026-04-16 VM1 배포 확정 스크립트)
+#
+# 인프라 실체:
+#   - VM1(210.109.15.187) 네이티브 Nginx (systemd, 컨테이너 아님)
+#   - Admin dist root: /var/www/admin/  (소유자 www-data:www-data)
+#   - Nginx location: `location /admin/ { alias /var/www/admin/; try_files $uri $uri/ /admin/index.html; }`
+#   - 접속: http://210.109.15.187/admin/
+#   - 빌드 시 `--base /admin/` 필수 (가이드 §6.4 주석: "에셋 경로를 /admin/assets/... 로 생성")
+#
+# 배포 흐름:
+#   1) npm ci + npm run build -- --base=/admin/
+#   2) dist → tar → artifact
+#   3) VM1 직접 SSH
+#   4) tar → /tmp/admin-new 스테이징
+#   5) /var/www/admin 백업 + 교체 (sudo sh -c glob 회피)
+#   6) chown www-data:www-data + macOS ._* 제거
+#   7) nginx -t + systemctl reload nginx
+#   8) smoke test http://VM1_HOST/admin/
+#
+# 필요 GitHub Secrets:
+#   DEPLOY_SSH_KEY / VM1_HOST / VM_USER / VITE_API_BASE_URL_PROD
+#   SLACK_WEBHOOK_URL (선택) — 설정 시 배포 완료/실패 시 슬랙 채널로 알림 전송.
+#                              미설정이면 notify 잡이 안전하게 스킵된다.
+
+name: CD (Production)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: cd-prod-admin
+  cancel-in-progress: false
+
+env:
+  NGINX_ROOT: /var/www/admin       # 가이드 §6.4 Nginx alias `/var/www/admin`
+  STAGING_DIR: /tmp/admin-new
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        continue-on-error: true
+        run: npm run lint
+      - name: Build (production, base=/admin/)
+        # 가이드 §6.4: Admin 은 /admin/ 서브패스로 서비스됨.
+        # vite.config.js 에 base 설정이 없으면 CLI 플래그로 주입 필수.
+        env:
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL_PROD }}
+          VITE_APP_ENV: production
+        run: npm run build -- --base=/admin/
+      - name: Pack dist as tarball
+        run: tar czf admin-dist.tar.gz -C dist .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-dist-tar
+          path: admin-dist.tar.gz
+          retention-days: 30
+
+  deploy:
+    name: Deploy to VM1
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: production
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: admin-dist-tar
+
+      - name: Setup SSH (VM1 직접)
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          cat >> ~/.ssh/config <<EOF
+          Host vm1
+            HostName ${{ secrets.VM1_HOST }}
+            User ${{ secrets.VM_USER }}
+            IdentityFile ~/.ssh/id_ed25519
+            StrictHostKeyChecking accept-new
+            ServerAliveInterval 30
+            ServerAliveCountMax 20
+          EOF
+
+      - name: Upload tar to VM1
+        run: scp admin-dist.tar.gz vm1:/home/ubuntu/admin-dist.tar.gz
+
+      - name: Deploy — 백업 + 교체 + chown + nginx reload
+        env:
+          NGINX_ROOT: ${{ env.NGINX_ROOT }}
+          STAGING_DIR: ${{ env.STAGING_DIR }}
+        run: |
+          ssh vm1 \
+            NGINX_ROOT="$NGINX_ROOT" \
+            STAGING_DIR="$STAGING_DIR" \
+            bash -s <<'REMOTE'
+          set -euo pipefail
+          TS=$(date +%Y%m%d-%H%M%S)
+
+          # 최초 배포 대응: /var/www/admin 이 없으면 백업 생략하고 디렉토리 생성
+          if [ -d "$NGINX_ROOT" ]; then
+            echo ">>> [1/6] 백업: ${NGINX_ROOT}.bak.${TS}"
+            sudo cp -r "$NGINX_ROOT" "${NGINX_ROOT}.bak.${TS}"
+          else
+            echo ">>> [1/6] 최초 배포 — 백업 생략, 디렉토리 생성"
+            sudo mkdir -p "$NGINX_ROOT"
+          fi
+
+          echo ">>> [2/6] 스테이징 dir 준비: $STAGING_DIR"
+          sudo rm -rf "$STAGING_DIR"
+          sudo mkdir -p "$STAGING_DIR"
+          sudo tar xzf /home/ubuntu/admin-dist.tar.gz -C "$STAGING_DIR"
+
+          echo ">>> [3/6] 구 파일 정리 (교체 대상만)"
+          sudo rm -rf "$NGINX_ROOT/assets" "$NGINX_ROOT/index.html"
+
+          echo ">>> [4/6] 신규 dist 복사 (sudo sh -c glob 회피)"
+          sudo sh -c "cp -r ${STAGING_DIR}/* ${NGINX_ROOT}/"
+
+          echo ">>> [5/6] 권한 www-data:www-data + macOS ._* 메타 정리"
+          sudo chown -R www-data:www-data "$NGINX_ROOT"
+          sudo find "$NGINX_ROOT" -name '._*' -delete
+
+          sudo rm -rf "$STAGING_DIR"
+          rm -f /home/ubuntu/admin-dist.tar.gz
+
+          echo ">>> [6/6] Nginx 설정 검증 + reload"
+          sudo nginx -t
+          if sudo -n systemctl reload nginx 2>/dev/null; then
+            echo "    ✅ systemctl reload nginx"
+          else
+            sudo nginx -s reload
+            echo "    ✅ nginx -s reload (fallback)"
+          fi
+
+          sudo find /var/www -maxdepth 1 -name 'admin.bak.*' -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+
+          echo "✅ Admin 배포 완료 — ${NGINX_ROOT} (backup: ${NGINX_ROOT}.bak.${TS})"
+          REMOTE
+
+      - name: Smoke test (Admin SPA + Nginx health)
+        run: |
+          # 1) Nginx /health (공통)
+          for i in 1 2 3; do
+            if curl -sf -m 5 "http://${{ secrets.VM1_HOST }}/health" > /dev/null 2>&1; then
+              echo "✅ Nginx /health OK"
+              break
+            fi
+            sleep 3
+          done
+
+          # 2) /admin/ 이 200 인지 (try_files fallback 포함)
+          STATUS=$(curl -sf -m 5 -o /dev/null -w "%{http_code}" \
+            "http://${{ secrets.VM1_HOST }}/admin/" || echo "000")
+          if [ "$STATUS" = "200" ]; then
+            echo "✅ /admin/ HTTP $STATUS"
+            exit 0
+          fi
+          echo "❌ /admin/ 응답 HTTP $STATUS — 배포 경로 또는 Nginx alias 설정 확인"
+          exit 1
+
+  # =========================================================================
+  # 배포 결과 슬랙 알림
+  # =========================================================================
+  # - build / deploy 두 잡 결과를 종합해 슬랙으로 단일 카드 전송.
+  # - deploy 잡 내부의 Smoke test 실패도 deploy.result=failure 로 전파되어 감지된다.
+  # - `if: always()` 로 실패/취소 시에도 호출.
+  # - SLACK_WEBHOOK_URL Secret 미설정 시 조용히 스킵.
+  notify:
+    name: Slack Notify
+    needs: [build, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Resolve overall status
+        id: status
+        env:
+          BUILD: ${{ needs.build.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+        run: |
+          if [ "$DEPLOY" = "success" ] && [ "$BUILD" = "success" ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "emoji=:white_check_mark:" >> "$GITHUB_OUTPUT"
+            echo "title=운영 배포 완료" >> "$GITHUB_OUTPUT"
+          elif [ "$DEPLOY" = "cancelled" ] || [ "$BUILD" = "cancelled" ]; then
+            echo "status=cancelled" >> "$GITHUB_OUTPUT"
+            echo "emoji=:black_circle:" >> "$GITHUB_OUTPUT"
+            echo "title=운영 배포 취소됨" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            echo "emoji=:x:" >> "$GITHUB_OUTPUT"
+            echo "title=운영 배포 실패" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send Slack webhook
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          EMOJI: ${{ steps.status.outputs.emoji }}
+          TITLE: ${{ steps.status.outputs.title }}
+          SERVICE: monglepick-admin
+          BUILD_RESULT: ${{ needs.build.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          SHA: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "ℹ️ SLACK_WEBHOOK_URL Secret 미설정 — 알림 스킵"
+            exit 0
+          fi
+
+          PAYLOAD=$(python3 <<'PY'
+          import json, os
+          sha = (os.environ.get("SHA") or "")[:7]
+          emoji = os.environ["EMOJI"]
+          title = os.environ["TITLE"]
+          service = os.environ["SERVICE"]
+          msg = (os.environ.get("COMMIT_MSG") or "").split("\n")[0][:200]
+
+          fields = [
+              {"type": "mrkdwn", "text": f"*서비스*\n{service}"},
+              {"type": "mrkdwn", "text": f"*브랜치*\n`{os.environ['BRANCH']}`"},
+              {"type": "mrkdwn", "text": f"*커밋*\n`{sha}`"},
+              {"type": "mrkdwn", "text": f"*실행자*\n{os.environ['ACTOR']}"},
+              {"type": "mrkdwn", "text": f"*빌드 / 배포*\n{os.environ['BUILD_RESULT']} / {os.environ['DEPLOY_RESULT']}"},
+          ]
+          blocks = [
+              {"type": "header", "text": {"type": "plain_text", "text": f"{emoji} {service} — {title}", "emoji": True}},
+              {"type": "section", "fields": fields},
+          ]
+          if msg:
+              blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*커밋 메시지*\n{msg}"}})
+          blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"<{os.environ['RUN_URL']}|:mag: 워크플로우 실행 로그 보기>"}})
+
+          print(json.dumps({
+              "text": f"{service} {title}",
+              "blocks": blocks,
+          }, ensure_ascii=False))
+          PY
+          )
+
+          HTTP_CODE=$(curl -sS -o /tmp/slack-resp.txt -w "%{http_code}" \
+            -X POST -H "Content-Type: application/json" \
+            --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" || echo "000")
+          echo "Slack HTTP $HTTP_CODE — $(cat /tmp/slack-resp.txt 2>/dev/null || true)"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "⚠️ Slack 전송 실패 (HTTP $HTTP_CODE) — 배포 결과는 유효"
+          fi

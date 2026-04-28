@@ -9,7 +9,8 @@
  * - FAQ CRUD + 순서 변경 (5개)
  * - 도움말 CRUD (4개)
  * - 티켓 목록/상세/상태변경/답변 (4개)
- * - 비속어 목록/추가/삭제/CSV 임포트/익스포트 (5개)
+ *
+ * 2026-04-08: 비속어 사전(Profanity) API 제거 — 관리자 요청으로 기능 삭제.
  */
 
 import { backendApi } from '@/shared/api/axiosInstance';
@@ -61,6 +62,20 @@ export function deleteNotice(id) {
  */
 export function reorderNotices(orders) {
   return backendApi.put(SUPPORT_ADMIN_ENDPOINTS.NOTICE_REORDER, orders);
+}
+
+/**
+ * 공지사항 활성/비활성 토글 (앱 메인 노출 제어).
+ *
+ * 2026-04-08: 앱 공지(AppNotice) 통합으로 추가. SupportNotice.isActive=false 이면
+ * 표시 기간과 무관하게 앱 메인 BANNER/POPUP/MODAL 노출이 차단된다.
+ *
+ * @param {number|string} id - 공지 noticeId
+ * @param {boolean} isActive - 활성 여부
+ * @returns {Promise<Object>} 업데이트된 공지
+ */
+export function updateNoticeActive(id, isActive) {
+  return backendApi.patch(SUPPORT_ADMIN_ENDPOINTS.NOTICE_ACTIVE(id), { isActive });
 }
 
 /* ── FAQ ── */
@@ -190,58 +205,4 @@ export function replyToTicket(id, data) {
   return backendApi.post(SUPPORT_ADMIN_ENDPOINTS.TICKET_REPLY(id), data);
 }
 
-/* ── 비속어 사전 (Profanity) ── */
-
-/**
- * 비속어 목록 조회.
- * @param {Object} params - { page, size, category, isActive }
- * @returns {Promise<Object>} 페이징된 비속어 목록
- */
-export function fetchProfanity(params) {
-  return backendApi.get(SUPPORT_ADMIN_ENDPOINTS.PROFANITY, { params });
-}
-
-/**
- * 비속어 추가.
- * @param {Object} data - { word, category, severity }
- * @returns {Promise<Object>} 추가된 비속어 항목
- */
-export function addProfanity(data) {
-  return backendApi.post(SUPPORT_ADMIN_ENDPOINTS.PROFANITY, data);
-}
-
-/**
- * 비속어 삭제.
- * @param {number|string} id - 비속어 항목 ID
- * @returns {Promise<void>}
- */
-export function deleteProfanity(id) {
-  return backendApi.delete(SUPPORT_ADMIN_ENDPOINTS.PROFANITY_DETAIL(id));
-}
-
-/**
- * 비속어 CSV 일괄 임포트.
- * Content-Type은 multipart/form-data로 자동 설정됨.
- * @param {File} file - CSV 파일 객체
- * @returns {Promise<Object>} 임포트 결과 (추가 수, 중복 수 등)
- */
-export function importProfanity(file) {
-  const formData = new FormData();
-  formData.append('file', file);
-  return backendApi.post(SUPPORT_ADMIN_ENDPOINTS.PROFANITY_IMPORT, formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  });
-}
-
-/**
- * 비속어 전체 CSV 익스포트.
- * responseType: 'blob'으로 파일 다운로드 처리.
- * axiosInstance의 response.data 언래핑을 우회하기 위해 별도 처리.
- * @returns {Promise<Blob>} CSV 파일 Blob
- */
-export function exportProfanity() {
-  return backendApi.get(SUPPORT_ADMIN_ENDPOINTS.PROFANITY_EXPORT, {
-    responseType: 'blob',
-    // axiosInstance 인터셉터가 response.data를 반환하므로 Blob이 그대로 반환됨
-  });
-}
+/* 2026-04-08: 비속어 사전 API 제거 (fetchProfanity/addProfanity/deleteProfanity/importProfanity/exportProfanity) */

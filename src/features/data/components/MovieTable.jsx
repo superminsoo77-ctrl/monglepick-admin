@@ -10,7 +10,11 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import styled from 'styled-components';
 import { MdSearch, MdEdit, MdDelete, MdChevronLeft, MdChevronRight, MdClose, MdStorage } from 'react-icons/md';
 import StatusBadge from '@/shared/components/StatusBadge';
-import { fetchMovies, fetchMovieDetail, updateMovie, deleteMovie, fetchMovieDbStatus } from '../api/dataApi';
+import { fetchMovies, fetchMovieDetail, updateMovie, deleteMovie } from '../api/dataApi';
+
+// 2026-04-15: `fetchMovieDbStatus` 는 Agent 미제공이라 import 에서 제거.
+// 5DB 동기 상태는 `fetchMovieDetail` 응답 자체에 `qdrant.exists` / `elasticsearch.exists` /
+// `neo4j.relations` 등이 포함되므로 상세 응답에서 파생하여 표시한다.
 
 /** 소스 옵션 */
 const SOURCE_OPTIONS = [
@@ -22,9 +26,14 @@ const SOURCE_OPTIONS = [
   { value: 'manual', label: '수동 등록' },
 ];
 
-/** DB 상태 표시 라벨 */
-const DB_LABELS = ['MySQL', 'Qdrant', 'Neo4j', 'ES', 'Redis'];
-const DB_KEYS = ['mysql', 'qdrant', 'neo4j', 'elasticsearch', 'redis'];
+/**
+ * DB 상태 표시 라벨.
+ *
+ * 2026-04-15: Redis 는 영화 단위 키가 없고 (캐시만 존재) Agent 도 영화별 Redis 상태를
+ * 반환하지 않으므로 배지 목록에서 제외한다. MySQL/Qdrant/Neo4j/ES 4개만 표시.
+ */
+const DB_LABELS = ['MySQL', 'Qdrant', 'Neo4j', 'ES'];
+const DB_KEYS = ['mysql', 'qdrant', 'neo4j', 'elasticsearch'];
 
 export default function MovieTable() {
   /* ── 목록 상태 ── */
@@ -95,19 +104,31 @@ export default function MovieTable() {
     };
   }, []);
 
-  /** 행 클릭 → 상세 모달 열기 */
+  /** 행 클릭 → 상세 모달 열기.
+   *
+   * Agent 의 `GET /admin/movies/{id}` 는 응답에 5DB 정보를 통합해서 내려주므로
+   * 별도 db-status 호출 없이 detail 응답에서 각 DB 존재 여부를 파생한다.
+   */
   async function handleRowClick(movie) {
     setModalLoading(true);
     setEditMode(false);
     setDeleteConfirm(false);
     setDbStatus(null);
     try {
-      const [detail, dbStat] = await Promise.allSettled([
-        fetchMovieDetail(movie.id),
-        fetchMovieDbStatus(movie.id),
-      ]);
-      setSelectedMovie(detail.status === 'fulfilled' ? detail.value : movie);
-      if (dbStat.status === 'fulfilled') setDbStatus(dbStat.value);
+      const detail = await fetchMovieDetail(movie.id);
+      setSelectedMovie(detail ?? movie);
+      // detail 응답 구조(admin_data.py get_movie_detail):
+      //   mysql: {...} | {error}
+      //   qdrant: {exists, payload} | {error}
+      //   neo4j: {relations: [...]} | {error}
+      //   elasticsearch: {exists, source} | {error}
+      setDbStatus({
+        mysql: detail?.mysql && !detail.mysql.error,
+        qdrant: detail?.qdrant?.exists === true,
+        neo4j: Array.isArray(detail?.neo4j?.relations) && detail.neo4j.relations.length > 0,
+        elasticsearch: detail?.elasticsearch?.exists === true,
+        redis: null,  // Agent 미제공 (캐시 상태는 영화 단위가 아닌 전역 키스페이스만 조회 가능)
+      });
     } catch {
       setSelectedMovie(movie);
     } finally {

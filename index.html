@@ -1,10 +1,29 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>monglepick-admin</title>
+    <title>몽글픽 관리자</title>
+    <!--
+      FOUC(Flash of Unstyled Content) 방지 인라인 스크립트.
+      React 번들 로드 전에 실행되어 저장된 테마를 즉시 적용한다.
+      localStorage 키: 'monglepick_admin_theme_mode'
+      기본값: 'light' (Admin 기본 테마)
+    -->
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('monglepick_admin_theme_mode');
+          var mode = (saved === 'light' || saved === 'dark') ? saved : 'light';
+          document.documentElement.setAttribute('data-theme', mode);
+          document.documentElement.style.colorScheme = mode;
+        } catch (e) {
+          /* localStorage 접근 불가 시 기본값(light) 유지 */
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -18,7 +18,7 @@
  * @param {Function} props.onDaysChange - 기간 변경 콜백 (days: number) => void
  */
 
-import styled from 'styled-components';
+import styled, { useTheme } from 'styled-components';
 import {
   ComposedChart,
   Line,
@@ -105,6 +105,21 @@ export default function TrendChart({ data, loading, days, onDaysChange }) {
   /* 데이터가 없을 때 표시할 빈 배열 */
   const chartData = Array.isArray(data) ? data : [];
 
+  /**
+   * useTheme으로 현재 테마 객체를 가져온다.
+   * Recharts 내부 요소(CartesianGrid, XAxis, YAxis 등)는
+   * styled-components 컨텍스트 밖에서 렌더링되므로
+   * theme 값을 props로 직접 전달해야 한다.
+   */
+  const theme = useTheme();
+
+  /* 차트에서 사용할 테마 색상 — 다크/라이트 모드에 따라 자동 변경 */
+  const gridColor = theme.colors.border;
+  const tickColor = theme.colors.textMuted;
+  const primaryColor = theme.colors.primary;
+  const successColor = theme.colors.success;
+  const warningColor = theme.colors.warning;
+
   return (
     <Wrapper>
       {/* ── 헤더: 제목 + 기간 선택 버튼 ── */}
@@ -143,21 +158,21 @@ export default function TrendChart({ data, loading, days, onDaysChange }) {
               data={chartData}
               margin={{ top: 8, right: 24, left: 0, bottom: 0 }}
             >
-              {/* 격자선 */}
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              {/* 격자선 — 테마 border 색상 사용 */}
+              <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
 
-              {/* X축: 날짜 레이블 */}
+              {/* X축: 날짜 레이블 — 테마 textMuted 색상 사용 */}
               <XAxis
                 dataKey="date"
-                tick={{ fontSize: 12, fill: '#94a3b8' }}
-                axisLine={{ stroke: '#e2e8f0' }}
+                tick={{ fontSize: 12, fill: tickColor }}
+                axisLine={{ stroke: gridColor }}
                 tickLine={false}
               />
 
               {/* 왼쪽 Y축: 사용자 수 */}
               <YAxis
                 yAxisId="left"
-                tick={{ fontSize: 12, fill: '#94a3b8' }}
+                tick={{ fontSize: 12, fill: tickColor }}
                 axisLine={false}
                 tickLine={false}
                 tickFormatter={(v) => `${Number(v).toLocaleString()}`}
@@ -167,7 +182,7 @@ export default function TrendChart({ data, loading, days, onDaysChange }) {
               <YAxis
                 yAxisId="right"
                 orientation="right"
-                tick={{ fontSize: 12, fill: '#94a3b8' }}
+                tick={{ fontSize: 12, fill: tickColor }}
                 axisLine={false}
                 tickLine={false}
                 tickFormatter={formatPaymentAxis}
@@ -178,7 +193,7 @@ export default function TrendChart({ data, loading, days, onDaysChange }) {
 
               {/* 범례 */}
               <Legend
-                wrapperStyle={{ fontSize: '13px', paddingTop: '12px' }}
+                wrapperStyle={{ fontSize: '13px', paddingTop: '12px', color: tickColor }}
               />
 
               {/* 결제 금액 Bar (오른쪽 Y축, 배경에 표시) */}
@@ -186,7 +201,7 @@ export default function TrendChart({ data, loading, days, onDaysChange }) {
                 yAxisId="right"
                 dataKey="paymentAmount"
                 name="결제 금액"
-                fill="#f59e0b"
+                fill={warningColor}
                 fillOpacity={0.6}
                 radius={[3, 3, 0, 0]}
                 barSize={days === 7 ? 32 : days === 14 ? 20 : 12}
@@ -198,9 +213,9 @@ export default function TrendChart({ data, loading, days, onDaysChange }) {
                 type="monotone"
                 dataKey="activeUsers"
                 name="활성 사용자"
-                stroke="#10b981"
+                stroke={successColor}
                 strokeWidth={2}
-                dot={{ r: 3, fill: '#10b981' }}
+                dot={{ r: 3, fill: successColor }}
                 activeDot={{ r: 5 }}
               />
 
@@ -210,9 +225,9 @@ export default function TrendChart({ data, loading, days, onDaysChange }) {
                 type="monotone"
                 dataKey="newUsers"
                 name="신규 가입"
-                stroke="#6366f1"
+                stroke={primaryColor}
                 strokeWidth={2}
-                dot={{ r: 3, fill: '#6366f1' }}
+                dot={{ r: 3, fill: primaryColor }}
                 activeDot={{ r: 5 }}
               />
             </ComposedChart>
@@ -297,7 +312,7 @@ const LoadingMsg = styled.p`
 /* ── Tooltip 스타일 ── */
 
 const TooltipBox = styled.div`
-  background: #ffffff;
+  background: ${({ theme }) => theme.colors.bgCard};
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: 6px;
   padding: ${({ theme }) => theme.spacing.md} ${({ theme }) => theme.spacing.lg};

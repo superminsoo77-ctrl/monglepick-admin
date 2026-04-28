@@ -11,6 +11,13 @@ import { AUTH_ENDPOINTS } from '@/shared/constants/api';
 import { ADMIN_ROUTES } from '@/shared/constants/routes';
 import useAuthStore from '@/shared/stores/useAuthStore';
 
+/* ── 테스트 관리자 시드 계정 (운영 DB 사전 등록, 2026-04-15 추가) ──
+ * 로그인 폼 작성 없이 즉시 입장하기 위한 원클릭 버튼용 자격증명.
+ * 운영 DB 의 monglepick_test_admin@monglepick.com / admin1234 (UserRole=ADMIN, AdminRole=SUPER_ADMIN) 와 동일 값.
+ */
+const TEST_ADMIN_EMAIL = 'monglepick_test_admin@monglepick.com';
+const TEST_ADMIN_PASSWORD = 'admin1234';
+
 export default function LoginPage() {
   const navigate = useNavigate();
   const login = useAuthStore((s) => s.login);
@@ -20,15 +27,21 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  /** 로그인 폼 제출 */
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  /**
+   * 공통 로그인 처리.
+   *
+   * <p>일반 폼 제출과 "테스트 관리자 로그인" 버튼이 동일한 경로를 타도록 추출했다.
+   * Backend `/api/v1/auth/login` 에서 ADMIN role 검증 후 JWT 발급, 실패 시 메시지 표시.</p>
+   */
+  const performLogin = async (loginEmail, loginPassword) => {
     setError('');
     setLoading(true);
 
     try {
-      /* /api/v1/admin/auth/login — 백엔드에서 ADMIN role 검증 (일반 유저 403 차단) */
-      const data = await backendApi.post(AUTH_ENDPOINTS.LOGIN, { email, password });
+      const data = await backendApi.post(AUTH_ENDPOINTS.LOGIN, {
+        email: loginEmail,
+        password: loginPassword,
+      });
 
       /* Zustand + localStorage 저장 */
       login({ accessToken: data.accessToken, user: data.user });
@@ -38,6 +51,17 @@ export default function LoginPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  /** 로그인 폼 제출 */
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    await performLogin(email, password);
+  };
+
+  /** 테스트 관리자 원클릭 로그인 — 운영 DB 시드 계정으로 즉시 진입 */
+  const handleTestAdminLogin = async () => {
+    await performLogin(TEST_ADMIN_EMAIL, TEST_ADMIN_PASSWORD);
   };
 
   return (
@@ -66,6 +90,17 @@ export default function LoginPage() {
           <SubmitButton type="submit" disabled={loading}>
             {loading ? '로그인 중...' : '로그인'}
           </SubmitButton>
+
+          {/*
+            테스트 관리자 원클릭 로그인 버튼 (2026-04-15 추가).
+            운영 DB 에 사전 적재된 monglepick_test_admin@monglepick.com / admin1234 로
+            폼 입력 없이 즉시 진입한다. 시연/QA 편의용.
+          */}
+          <Divider>또는</Divider>
+          <TestLoginButton type="button" onClick={handleTestAdminLogin} disabled={loading}>
+            테스트 관리자로 로그인
+          </TestLoginButton>
+          <TestLoginHint>monglepick_test_admin@monglepick.com</TestLoginHint>
         </Form>
       </Card>
     </Wrapper>
@@ -146,4 +181,59 @@ const SubmitButton = styled.button`
     opacity: 0.6;
     cursor: not-allowed;
   }
+`;
+
+/* ── 테스트 관리자 원클릭 로그인용 보조 UI ────────────────────── */
+
+/** "또는" 구분선 — 폼 제출 / 테스트 로그인 사이의 시각적 분리 */
+const Divider = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  color: ${({ theme }) => theme.colors.textMuted};
+  margin: ${({ theme }) => theme.spacing.sm} 0;
+
+  &::before,
+  &::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: ${({ theme }) => theme.colors.border};
+  }
+`;
+
+/**
+ * 테스트 관리자 로그인 버튼.
+ *
+ * <p>일반 SubmitButton 과 시각적으로 구분되도록 outline 스타일로 처리.
+ * 운영 DB 에 시드된 SUPER_ADMIN 계정으로 즉시 진입하므로,
+ * 의도치 않은 클릭을 막기 위해 강조색 대신 보조색을 사용한다.</p>
+ */
+const TestLoginButton = styled.button`
+  padding: 12px;
+  background: transparent;
+  color: ${({ theme }) => theme.colors.primary};
+  border: 1px solid ${({ theme }) => theme.colors.primary};
+  border-radius: 8px;
+  font-size: ${({ theme }) => theme.fontSizes.md};
+  font-weight: ${({ theme }) => theme.fontWeights.semibold};
+  transition: all ${({ theme }) => theme.transitions.fast};
+
+  &:hover:not(:disabled) {
+    background: ${({ theme }) => theme.colors.primary};
+    color: #fff;
+  }
+  &:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+`;
+
+/** 테스트 계정 식별용 힌트 텍스트 */
+const TestLoginHint = styled.p`
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textMuted};
+  text-align: center;
+  margin-top: -${({ theme }) => theme.spacing.sm};
 `;

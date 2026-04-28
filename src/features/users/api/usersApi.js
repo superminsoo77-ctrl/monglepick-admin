@@ -55,10 +55,21 @@ export function updateUserRole(userId, data) {
  * @param {string} userId - 사용자 ID
  * @param {Object} data - 정지 요청 데이터
  * @param {string} data.reason - 정지 사유
+ * @param {number} [data.durationDays] - 임시 정지 일수 (null=영구 정지)
  * @returns {Promise<Object>} 처리 결과
  */
 export function suspendUser(userId, data) {
   return backendApi.put(`${ADMIN_USERS}/${userId}/suspend`, data);
+}
+
+/**
+ * 사용자 제재 이력 조회 (정지/복구 이력 최신순).
+ *
+ * @param {string} userId - 사용자 ID
+ * @returns {Promise<Array>} SuspensionHistoryResponse 배열
+ */
+export function fetchSuspensionHistory(userId) {
+  return backendApi.get(`${ADMIN_USERS}/${userId}/suspension-history`);
 }
 
 /**
@@ -108,4 +119,46 @@ export function fetchUserPoints(userId, params = {}) {
  */
 export function fetchUserPayments(userId, params = {}) {
   return backendApi.get(`${ADMIN_USERS}/${userId}/payments`, { params });
+}
+
+/**
+ * 사용자 리워드 진행 현황 조회 (2026-04-14 신설).
+ *
+ * Backend GET /api/v1/admin/users/{userId}/rewards 와 1:1 매핑.
+ * 사용자 본인이 /api/v1/point/progress 로 보는 것과 동일한 구조를 관리자 시점에서 조회한다.
+ *
+ * @param {string} userId - 사용자 ID
+ * @returns {Promise<Object>} UserRewardStatusResponse
+ *   - userId, totalEarned, earnedByActivity, currentBalance, gradeCode
+ *   - activities: ActivityProgressResponse[] (일반 활동 — 일일 한도/카운터)
+ *   - milestones: MilestoneProgressResponse[] (threshold 기반 — 달성률)
+ */
+export function fetchUserRewards(userId) {
+  return backendApi.get(`${ADMIN_USERS}/${userId}/rewards`);
+}
+
+/**
+ * 관리자 수동 포인트 지급/회수 (Phase 6-2).
+ *
+ * @param {string} userId - 사용자 ID
+ * @param {Object} data - 조정 요청
+ * @param {number} data.amount - 변동량 (양수=지급, 음수=회수, 0 금지)
+ * @param {string} data.reason - 사유 (필수, 최대 300자)
+ * @returns {Promise<Object>} ManualPointResponse { deltaApplied, balanceBefore, balanceAfter, ... }
+ */
+export function adjustUserPoints(userId, data) {
+  return backendApi.post(`${ADMIN_USERS}/${userId}/points/adjust`, data);
+}
+
+/**
+ * 관리자 수동 AI 이용권 발급 (Phase 6-3).
+ *
+ * @param {string} userId - 사용자 ID
+ * @param {Object} data - 발급 요청
+ * @param {number} data.count - 발급 수량 (1 이상 정수)
+ * @param {string} data.reason - 사유 (필수, 최대 300자)
+ * @returns {Promise<Object>} GrantAiTokenResponse { grantedCount, tokensBefore, tokensAfter, ... }
+ */
+export function grantAiTokens(userId, data) {
+  return backendApi.post(`${ADMIN_USERS}/${userId}/tokens/grant`, data);
 }

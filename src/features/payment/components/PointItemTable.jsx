@@ -3,35 +3,100 @@
  *
  * 교환 가능한 포인트 아이템 목록을 조회하고 인라인 수정 기능을 제공한다.
  * - 아이템 목록 테이블 (이름/카테고리/가격/설명/활성여부)
- * - 행 클릭 시 인라인 편집 모드 진입 (수정 중인 행 하이라이트)
+ * - 행의 수정 버튼 클릭 시 인라인 편집 모드 진입
  * - 수정 저장 시 updatePointItem API 호출
- * - 활성/비활성 토글 버튼으로 빠른 상태 변경 가능
+ * - 활성/비활성 토글 버튼으로 빠른 상태 변경 (ConfirmModal 확인)
+ *
+ * 2026-04-14 변경:
+ *  - 백엔드 DTO(PointItemResponse / PointItemUpdateRequest) 필드 정합화.
+ *    기존 코드가 item.id / item.name / item.price / item.description / item.active /
+ *    item.category 를 사용했지만 실제 필드는 pointItemId / itemName / itemPrice /
+ *    itemDescription / isActive / itemCategory 이다. 이로 인해 화면에 데이터가
+ *    비어 보이는 것처럼 표시되던 문제를 해결한다.
+ *  - window.confirm / alert 제거 → ConfirmModal 교체
+ *  - 업데이트 페이로드 역시 필드명 통일
  *
  * @module PointItemTable
  */
 
 import { useState, useEffect, useCallback } from 'react';
 import styled from 'styled-components';
-import { MdRefresh, MdEdit, MdCheck, MdClose } from 'react-icons/md';
+import { MdRefresh, MdEdit, MdCheck, MdClose, MdAdd, MdImageNotSupported } from 'react-icons/md';
 import { fetchPointItems, updatePointItem } from '../api/paymentApi';
 import StatusBadge from '@/shared/components/StatusBadge';
+import ConfirmModal from '@/shared/components/ConfirmModal';
+import PointItemCreateModal from './PointItemCreateModal';
 
-/** 카테고리 한국어 레이블 */
+/**
+ * 카테고리 한국어 레이블 — 2026-04-27 정합화.
+ *
+ * Backend `PointItemCategory` 정규값(소문자 5종) + 레거시값을 모두 포함.
+ * 신규 등록은 `coupon`/`avatar`/`badge`/`apply`/`hint` 만 사용하며,
+ * `subscription_discount`/`profile_item` 등은 PointItemInitializer 가 비활성화 처리한 잔재.
+ */
 const CATEGORY_LABEL = {
-  SUBSCRIPTION_DISCOUNT: '구독 할인',
-  EXTRA_QUOTA:           '추가 쿼터',
-  PROFILE_ITEM:          '프로필 아이템',
-  GIFT:                  '선물',
-  ETC:                   '기타',
+  general:               '일반',
+  coupon:                '쿠폰',
+  avatar:                '아바타',
+  badge:                 '배지',
+  apply:                 '응모권',
+  hint:                  '힌트',
+  ai:                    'AI 이용권 (레거시)',
+  subscription_discount: '구독 할인 (레거시)',
+  extra_quota:           '추가 쿼터 (레거시)',
+  profile_item:          '프로필 아이템 (레거시)',
+  gift:                  '선물 (레거시)',
+  etc:                   '기타 (레거시)',
 };
 
-/** 편집 가능한 필드 초기값 추출 */
+/**
+ * 인라인 편집용 카테고리 옵션 — 신규 등록 모달의 옵션과 동일.
+ * Backend 정규 5종만 노출하여 레거시 값 신규 입력을 차단한다.
+ */
+const EDITABLE_CATEGORY_OPTIONS = [
+  { value: '',         label: '미지정 (general)' },
+  { value: 'avatar',   label: '아바타' },
+  { value: 'badge',    label: '배지' },
+  { value: 'coupon',   label: '쿠폰' },
+  { value: 'apply',    label: '응모권' },
+  { value: 'hint',     label: '힌트' },
+];
+
+/**
+ * 인라인 편집용 itemType 옵션 — 신규 등록 모달의 옵션과 동일하게 유지하되,
+ * 좁은 인라인 편집 셀에 적합하도록 group label 없이 평탄화.
+ */
+const EDITABLE_ITEM_TYPE_OPTIONS = [
+  { value: '',                   label: '미지정 (교환 차단)' },
+  { value: 'AVATAR_GENERIC',     label: 'AVATAR_GENERIC' },
+  { value: 'BADGE_GENERIC',      label: 'BADGE_GENERIC' },
+  { value: 'AVATAR_MONGLE',      label: 'AVATAR_MONGLE (레거시)' },
+  { value: 'BADGE_PREMIUM',      label: 'BADGE_PREMIUM (레거시)' },
+  { value: 'AI_TOKEN_1',         label: 'AI_TOKEN_1' },
+  { value: 'AI_TOKEN_5',         label: 'AI_TOKEN_5' },
+  { value: 'AI_TOKEN_20',        label: 'AI_TOKEN_20' },
+  { value: 'AI_TOKEN_50',        label: 'AI_TOKEN_50' },
+  { value: 'APPLY_MOVIE_TICKET', label: 'APPLY_MOVIE_TICKET' },
+  { value: 'QUIZ_HINT',          label: 'QUIZ_HINT' },
+];
+
+function displayCategory(category) {
+  if (!category) return '-';
+  return CATEGORY_LABEL[category] ?? CATEGORY_LABEL[category.toLowerCase()] ?? category;
+}
+
+/** 편집 가능한 필드 초기값 추출 — 2026-04-27: itemType/amount/durationDays/imageUrl 포함. */
 function toEditForm(item) {
   return {
-    name:        item.name ?? '',
-    price:       String(item.price ?? ''),
-    description: item.description ?? '',
-    active:      item.active ?? true,
+    itemName:        item.itemName ?? '',
+    itemPrice:       String(item.itemPrice ?? ''),
+    itemDescription: item.itemDescription ?? '',
+    itemCategory:    item.itemCategory ?? '',
+    itemType:        item.itemType ?? '',
+    amount:          item.amount != null ? String(item.amount) : '',
+    durationDays:    item.durationDays != null ? String(item.durationDays) : '',
+    imageUrl:        item.imageUrl ?? '',
+    isActive:        item.isActive ?? true,
   };
 }
 
@@ -40,14 +105,19 @@ export default function PointItemTable() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  /* 인라인 편집 상태 — 편집 중인 아이템 ID */
+  /* 인라인 편집 상태 */
   const [editingId, setEditingId] = useState(null);
-  /* 편집 폼 값 */
   const [editForm, setEditForm] = useState({});
-  /* 저장 중인 아이템 ID */
   const [savingId, setSavingId] = useState(null);
-  /* 편집 에러 */
   const [editError, setEditError] = useState(null);
+
+  /* 신규 등록 모달 */
+  const [createModalOpen, setCreateModalOpen] = useState(false);
+
+  /* 활성/비활성 토글 모달 */
+  const [toggleTarget, setToggleTarget] = useState(null);
+  const [toggleLoading, setToggleLoading] = useState(false);
+  const [toggleError, setToggleError] = useState(null);
 
   /** 아이템 목록 조회 */
   const loadItems = useCallback(async () => {
@@ -70,7 +140,7 @@ export default function PointItemTable() {
 
   /** 편집 모드 진입 */
   function startEdit(item) {
-    setEditingId(item.id);
+    setEditingId(item.pointItemId);
     setEditForm(toEditForm(item));
     setEditError(null);
   }
@@ -91,29 +161,48 @@ export default function PointItemTable() {
   /** 편집 저장 */
   async function handleSave(itemId) {
     /* 유효성 검사 */
-    if (!editForm.name?.trim()) {
+    if (!editForm.itemName?.trim()) {
       setEditError('아이템 이름을 입력해주세요.');
       return;
     }
-    const price = Number(editForm.price);
-    if (!editForm.price || isNaN(price) || price < 0) {
+    const price = Number(editForm.itemPrice);
+    if (!editForm.itemPrice || Number.isNaN(price) || price < 0) {
       setEditError('가격을 올바르게 입력해주세요.');
+      return;
+    }
+
+    /* 선택 필드 검증 — 0 이상 정수 또는 빈값(=NULL) */
+    const amountNum = editForm.amount === '' || editForm.amount == null
+      ? null : Number(editForm.amount);
+    if (amountNum !== null && (!Number.isFinite(amountNum) || !Number.isInteger(amountNum) || amountNum < 0)) {
+      setEditError('지급 수량은 0 이상의 정수여야 합니다.');
+      return;
+    }
+    const durationNum = editForm.durationDays === '' || editForm.durationDays == null
+      ? null : Number(editForm.durationDays);
+    if (durationNum !== null && (!Number.isFinite(durationNum) || !Number.isInteger(durationNum) || durationNum < 0)) {
+      setEditError('유효기간(일)은 0 이상의 정수여야 합니다.');
       return;
     }
 
     try {
       setSavingId(itemId);
       setEditError(null);
-      const updated = await updatePointItem(itemId, {
-        name:        editForm.name.trim(),
-        price,
-        description: editForm.description.trim(),
-        active:      editForm.active,
-      });
+      const payload = {
+        itemName:        editForm.itemName.trim(),
+        itemPrice:       price,
+        itemDescription: editForm.itemDescription.trim(),
+        itemCategory:    (editForm.itemCategory ?? '').trim() || 'general',
+        itemType:        (editForm.itemType ?? '').trim() || null,
+        amount:          amountNum,
+        durationDays:    durationNum,
+        imageUrl:        (editForm.imageUrl ?? '').trim() || null,
+        isActive:        editForm.isActive,
+      };
+      const updated = await updatePointItem(itemId, payload);
 
-      /* 로컬 상태 즉시 갱신 (목록 재조회 없이) */
       setItems((prev) =>
-        prev.map((item) => (item.id === itemId ? { ...item, ...updated } : item))
+        prev.map((it) => (it.pointItemId === itemId ? { ...it, ...updated } : it))
       );
       setEditingId(null);
       setEditForm({});
@@ -124,25 +213,42 @@ export default function PointItemTable() {
     }
   }
 
-  /**
-   * 활성/비활성 빠른 토글.
-   * 편집 모드 없이 active 상태만 즉시 변경한다.
-   */
-  async function handleToggleActive(item) {
-    const newActive = !item.active;
-    const label = newActive ? '활성화' : '비활성화';
-    if (!window.confirm(`"${item.name}"을(를) ${label}하시겠습니까?`)) return;
+  /** 활성/비활성 토글 모달 열기 */
+  function openToggle(item) {
+    setToggleError(null);
+    setToggleTarget(item);
+  }
 
+  /** 토글 확인 */
+  async function runToggle() {
+    if (!toggleTarget) return;
+    const itemId = toggleTarget.pointItemId;
+    const nextActive = !toggleTarget.isActive;
+
+    setToggleLoading(true);
+    setToggleError(null);
     try {
-      setSavingId(item.id);
-      const updated = await updatePointItem(item.id, { ...item, active: newActive });
+      /* 활성/비활성 토글은 isActive 외 모든 필드를 보존해야 한다 — 신규 itemType/amount/...
+       * 필드도 그대로 전달해 운영자가 토글 한 번으로 데이터를 잃지 않도록 한다. */
+      const updated = await updatePointItem(itemId, {
+        itemName:        toggleTarget.itemName,
+        itemPrice:       toggleTarget.itemPrice,
+        itemDescription: toggleTarget.itemDescription,
+        itemCategory:    toggleTarget.itemCategory ?? 'general',
+        itemType:        toggleTarget.itemType ?? null,
+        amount:          toggleTarget.amount ?? null,
+        durationDays:    toggleTarget.durationDays ?? null,
+        imageUrl:        toggleTarget.imageUrl ?? null,
+        isActive:        nextActive,
+      });
       setItems((prev) =>
-        prev.map((i) => (i.id === item.id ? { ...i, ...updated } : i))
+        prev.map((it) => (it.pointItemId === itemId ? { ...it, ...updated } : it))
       );
+      setToggleTarget(null);
     } catch (err) {
-      alert(`${label} 실패: ${err.message}`);
+      setToggleError(err?.message ?? '처리 실패');
     } finally {
-      setSavingId(null);
+      setToggleLoading(false);
     }
   }
 
@@ -150,9 +256,20 @@ export default function PointItemTable() {
     <Section>
       <SectionHeader>
         <SectionTitle>포인트 아이템 ({items.length}개)</SectionTitle>
-        <RefreshButton onClick={loadItems} disabled={loading}>
-          <MdRefresh size={16} />
-        </RefreshButton>
+        <HeaderActions>
+          <CreateButton
+            type="button"
+            onClick={() => setCreateModalOpen(true)}
+            disabled={loading || editingId !== null}
+            title={editingId !== null ? '편집 중에는 신규 등록 불가' : '신규 아이템 등록'}
+          >
+            <MdAdd size={16} />
+            신규 등록
+          </CreateButton>
+          <RefreshButton onClick={loadItems} disabled={loading} title="새로고침">
+            <MdRefresh size={16} />
+          </RefreshButton>
+        </HeaderActions>
       </SectionHeader>
 
       <GuideText>
@@ -172,9 +289,12 @@ export default function PointItemTable() {
           <Table>
             <thead>
               <tr>
+                <Th>이미지</Th>
                 <Th>아이템명</Th>
                 <Th>카테고리</Th>
+                <Th>itemType</Th>
                 <Th>가격 (P)</Th>
+                <Th>유효기간</Th>
                 <Th>설명</Th>
                 <Th>활성</Th>
                 <Th>액션</Th>
@@ -182,69 +302,111 @@ export default function PointItemTable() {
             </thead>
             <tbody>
               {items.map((item) => {
-                const isEditing = editingId === item.id;
-                const isSaving  = savingId === item.id;
+                const isEditing = editingId === item.pointItemId;
+                const isSaving  = savingId === item.pointItemId;
 
                 return isEditing ? (
                   /* ── 편집 행 ── */
-                  <EditRow key={item.id}>
-                    {/* 아이템명 편집 */}
+                  <EditRow key={item.pointItemId}>
+                    {/* 이미지 — 편집 모드에서는 URL 입력 + 썸네일 미리보기 */}
+                    <Td>
+                      <ThumbColumn>
+                        <Thumbnail
+                          src={editForm.imageUrl?.trim() || item.imageUrl || null}
+                          alt={item.itemName}
+                        />
+                        <EditInput
+                          type="text"
+                          value={editForm.imageUrl}
+                          onChange={(e) => handleEditChange('imageUrl', e.target.value)}
+                          placeholder="/avatars/x.svg"
+                          maxLength={500}
+                          style={{ width: '160px' }}
+                        />
+                      </ThumbColumn>
+                    </Td>
+
                     <Td>
                       <EditInput
                         type="text"
-                        value={editForm.name}
-                        onChange={(e) => handleEditChange('name', e.target.value)}
+                        value={editForm.itemName}
+                        onChange={(e) => handleEditChange('itemName', e.target.value)}
                         placeholder="아이템명"
-                        maxLength={100}
+                        maxLength={200}
                         autoFocus
                       />
                     </Td>
 
-                    {/* 카테고리 — 편집 불가 (읽기 전용 표시) */}
-                    <Td muted>
-                      {CATEGORY_LABEL[item.category] ?? item.category ?? '-'}
+                    <Td>
+                      <EditSelect
+                        value={editForm.itemCategory}
+                        onChange={(e) => handleEditChange('itemCategory', e.target.value)}
+                      >
+                        {EDITABLE_CATEGORY_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </EditSelect>
                     </Td>
 
-                    {/* 가격 편집 */}
+                    <Td>
+                      <EditSelect
+                        value={editForm.itemType}
+                        onChange={(e) => handleEditChange('itemType', e.target.value)}
+                      >
+                        {EDITABLE_ITEM_TYPE_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </EditSelect>
+                    </Td>
+
                     <Td>
                       <EditInput
                         type="number"
                         min={0}
-                        value={editForm.price}
-                        onChange={(e) => handleEditChange('price', e.target.value)}
+                        value={editForm.itemPrice}
+                        onChange={(e) => handleEditChange('itemPrice', e.target.value)}
                         placeholder="0"
                         style={{ width: '90px' }}
                       />
                     </Td>
 
-                    {/* 설명 편집 */}
+                    <Td>
+                      <EditInput
+                        type="number"
+                        min={0}
+                        value={editForm.durationDays}
+                        onChange={(e) => handleEditChange('durationDays', e.target.value)}
+                        placeholder="무기한"
+                        style={{ width: '80px' }}
+                        title="유효기간(일). 비워두면 무기한."
+                      />
+                    </Td>
+
                     <Td>
                       <EditInput
                         type="text"
-                        value={editForm.description}
-                        onChange={(e) => handleEditChange('description', e.target.value)}
+                        value={editForm.itemDescription}
+                        onChange={(e) => handleEditChange('itemDescription', e.target.value)}
                         placeholder="설명 (선택)"
-                        maxLength={200}
+                        maxLength={500}
                         style={{ width: '100%', minWidth: '180px' }}
                       />
                     </Td>
 
-                    {/* 활성 여부 체크박스 */}
                     <Td>
                       <ActiveCheckbox
                         type="checkbox"
-                        checked={editForm.active}
-                        onChange={(e) => handleEditChange('active', e.target.checked)}
+                        checked={editForm.isActive}
+                        onChange={(e) => handleEditChange('isActive', e.target.checked)}
                       />
                     </Td>
 
-                    {/* 저장/취소 버튼 */}
                     <Td>
                       <ActionGroup>
                         <IconButton
                           $variant="success"
                           disabled={isSaving}
-                          onClick={() => handleSave(item.id)}
+                          onClick={() => handleSave(item.pointItemId)}
                           title="저장"
                         >
                           {isSaving ? '...' : <MdCheck size={15} />}
@@ -262,23 +424,38 @@ export default function PointItemTable() {
                   </EditRow>
                 ) : (
                   /* ── 일반 행 ── */
-                  <tr key={item.id}>
-                    <Td bold>{item.name}</Td>
-                    <Td muted>
-                      {CATEGORY_LABEL[item.category] ?? item.category ?? '-'}
+                  <tr key={item.pointItemId}>
+                    <Td>
+                      <Thumbnail src={item.imageUrl} alt={item.itemName} />
                     </Td>
-                    <Td mono>{Number(item.price)?.toLocaleString()}P</Td>
-                    <Td muted>{item.description || '-'}</Td>
+                    <Td bold>{item.itemName ?? '-'}</Td>
+                    <Td muted>{displayCategory(item.itemCategory)}</Td>
+                    <Td mono>
+                      {item.itemType ? (
+                        <ItemTypeBadge $unsupported={item.itemType === 'UNKNOWN'}>
+                          {item.itemType}
+                        </ItemTypeBadge>
+                      ) : (
+                        <ItemTypeBadge $unsupported>미지정</ItemTypeBadge>
+                      )}
+                    </Td>
+                    <Td mono>
+                      {item.itemPrice != null ? `${Number(item.itemPrice).toLocaleString()}P` : '-'}
+                    </Td>
+                    <Td muted>
+                      {item.durationDays != null ? `${item.durationDays}일` : '무기한'}
+                    </Td>
+                    <Td muted>{item.itemDescription || '-'}</Td>
                     <Td>
                       <ActiveToggle
-                        $active={item.active}
+                        $active={item.isActive}
                         disabled={isSaving}
-                        onClick={() => handleToggleActive(item)}
-                        title={item.active ? '클릭하여 비활성화' : '클릭하여 활성화'}
+                        onClick={() => openToggle(item)}
+                        title={item.isActive ? '클릭하여 비활성화' : '클릭하여 활성화'}
                       >
                         <StatusBadge
-                          status={item.active ? 'success' : 'default'}
-                          label={item.active ? '활성' : '비활성'}
+                          status={item.isActive ? 'success' : 'default'}
+                          label={item.isActive ? '활성' : '비활성'}
                         />
                       </ActiveToggle>
                     </Td>
@@ -299,6 +476,33 @@ export default function PointItemTable() {
           </Table>
         )}
       </TableWrapper>
+
+      {/* 신규 등록 모달 */}
+      <PointItemCreateModal
+        isOpen={createModalOpen}
+        onClose={() => setCreateModalOpen(false)}
+        onCreated={loadItems}
+      />
+
+      {/* 활성/비활성 토글 모달 */}
+      <ConfirmModal
+        isOpen={!!toggleTarget}
+        title={toggleTarget?.isActive ? '아이템 비활성화' : '아이템 활성화'}
+        description={
+          toggleTarget
+            ? `"${toggleTarget.itemName}"을(를) ${toggleTarget.isActive ? '비활성화' : '활성화'}하시겠습니까?`
+            : null
+        }
+        confirmText={toggleTarget?.isActive ? '비활성화' : '활성화'}
+        cancelText="취소"
+        variant={toggleTarget?.isActive ? 'warning' : 'primary'}
+        loading={toggleLoading}
+        error={toggleError}
+        onConfirm={runToggle}
+        onClose={() => {
+          if (!toggleLoading) setToggleTarget(null);
+        }}
+      />
     </Section>
   );
 }
@@ -319,6 +523,35 @@ const SectionHeader = styled.div`
 const SectionTitle = styled.h3`
   font-size: ${({ theme }) => theme.fontSizes.heading};
   font-weight: ${({ theme }) => theme.fontWeights.semibold};
+`;
+
+const HeaderActions = styled.div`
+  display: flex;
+  align-items: center;
+  gap: ${({ theme }) => theme.spacing.sm};
+`;
+
+const CreateButton = styled.button`
+  display: inline-flex;
+  align-items: center;
+  gap: ${({ theme }) => theme.spacing.xs};
+  padding: 6px ${({ theme }) => theme.spacing.lg};
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-weight: ${({ theme }) => theme.fontWeights.medium};
+  color: #ffffff;
+  background: ${({ theme }) => theme.colors.primary};
+  border-radius: 4px;
+  transition: opacity ${({ theme }) => theme.transitions.fast};
+  white-space: nowrap;
+
+  &:hover:not(:disabled) {
+    opacity: 0.85;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 `;
 
 const GuideText = styled.p`
@@ -369,7 +602,102 @@ const TableWrapper = styled.div`
 const Table = styled.table`
   width: 100%;
   border-collapse: collapse;
-  min-width: 700px;
+  min-width: 980px;
+`;
+
+/* ── 이미지 썸네일 ────────────────────────────────────────
+ *
+ * 정적 자산은 monglepick-client (5173) 측에서만 호스팅되므로 admin (5174) 에서
+ * 경로 그대로 로드하면 404 가 난다. 동적으로 monglepick-client origin 을 prefix.
+ * 운영 배포 시에는 nginx 가 동일 origin 으로 묶지만 dev 에서는 명시적 prefix 가 안전.
+ *
+ * 외부 URL(http/https) 은 그대로 사용. 운영자는 CDN URL 을 직접 입력 가능.
+ */
+const CLIENT_ASSETS_ORIGIN = (import.meta?.env?.VITE_CLIENT_ASSETS_ORIGIN
+  ?? 'http://localhost:5173').replace(/\/$/, '');
+
+function resolveImageSrc(src) {
+  if (!src) return null;
+  if (/^https?:\/\//i.test(src)) return src;
+  if (src.startsWith('/')) return `${CLIENT_ASSETS_ORIGIN}${src}`;
+  return src;
+}
+
+/**
+ * 안전한 이미지 썸네일 — 경로 없거나 로드 실패 시 placeholder 아이콘.
+ * styled-components 의 기본 export 와 React 컴포넌트가 같은 이름을 가져도 무방.
+ */
+function Thumbnail({ src, alt }) {
+  const [errored, setErrored] = useState(false);
+  const resolved = resolveImageSrc(src);
+  if (!resolved || errored) {
+    return (
+      <ThumbPlaceholder title={alt}>
+        <MdImageNotSupported size={16} />
+      </ThumbPlaceholder>
+    );
+  }
+  return <ThumbImg src={resolved} alt={alt || ''} onError={() => setErrored(true)} />;
+}
+
+const ThumbImg = styled.img`
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  background: ${({ theme }) => theme.colors.bgHover};
+`;
+
+const ThumbPlaceholder = styled.div`
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: ${({ theme }) => theme.colors.textMuted};
+  background: ${({ theme }) => theme.colors.bgHover};
+  border: 1px dashed ${({ theme }) => theme.colors.border};
+`;
+
+/** 편집 행에서 썸네일 + URL 입력을 세로 정렬 */
+const ThumbColumn = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: ${({ theme }) => theme.spacing.xs};
+`;
+
+/** itemType 표시 배지 — 미지정/UNKNOWN 은 경고 색 */
+const ItemTypeBadge = styled.span`
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: ${({ theme }) => theme.layout?.cardRadius || '4px'};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-weight: ${({ theme }) => theme.fontWeights.medium};
+  font-family: ${({ theme }) => theme.fonts.mono};
+  ${({ $unsupported, theme }) => $unsupported
+    ? `color: ${theme.colors.warning ?? theme.colors.error}; background: ${theme.colors.warningBg ?? theme.colors.errorBg}; border: 1px solid ${theme.colors.warning ?? theme.colors.error};`
+    : `color: ${theme.colors.textSecondary}; background: ${theme.colors.bgHover}; border: 1px solid ${theme.colors.border};`}
+`;
+
+/** 인라인 편집 select — EditInput 과 시각 통일 */
+const EditSelect = styled.select`
+  height: 30px;
+  padding: 0 ${({ theme }) => theme.spacing.sm};
+  border: 1px solid ${({ theme }) => theme.colors.primary};
+  border-radius: 4px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  color: ${({ theme }) => theme.colors.textPrimary};
+  background: ${({ theme }) => theme.colors.bgCard};
+  cursor: pointer;
+  min-width: 140px;
+
+  &:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.primaryLight};
+  }
 `;
 
 const Th = styled.th`
@@ -397,7 +725,6 @@ const Td = styled.td`
   tr:last-child & { border-bottom: none; }
 `;
 
-/** 편집 중인 행 — 배경 하이라이트 */
 const EditRow = styled.tr`
   background: ${({ theme }) => theme.colors.primaryBg};
 
@@ -437,7 +764,6 @@ const ActiveCheckbox = styled.input`
   cursor: pointer;
 `;
 
-/** 활성 뱃지를 버튼처럼 클릭 가능하게 래핑 */
 const ActiveToggle = styled.button`
   background: none;
   border: none;

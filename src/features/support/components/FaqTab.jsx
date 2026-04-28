@@ -14,35 +14,60 @@ import styled from 'styled-components';
 import { MdAdd, MdEdit, MdDelete, MdRefresh } from 'react-icons/md';
 import { fetchFaqs, createFaq, updateFaq, deleteFaq } from '../api/supportApi';
 import StatusBadge from '@/shared/components/StatusBadge';
+import { useQueryParams } from '@/shared/hooks/useQueryParams';
+import { useAiPrefill } from '@/shared/hooks/useAiPrefill';
+import AiPrefillBanner from '@/shared/components/AiPrefillBanner';
 
-/** FAQ 카테고리 옵션 */
+/**
+ * FAQ 카테고리 옵션.
+ *
+ * <p>Backend {@code SupportCategory} enum 과 1:1 동기화되어야 한다.
+ * 정의 위치: {@code monglepick-backend/.../domain/support/entity/SupportCategory.java}</p>
+ *
+ * <p>허용 값: GENERAL / ACCOUNT / CHAT / RECOMMENDATION / COMMUNITY / PAYMENT (6종)</p>
+ */
 const CATEGORIES = [
   { value: '', label: '전체' },
+  { value: 'GENERAL', label: '일반' },
   { value: 'ACCOUNT', label: '계정' },
-  { value: 'PAYMENT', label: '결제/포인트' },
-  { value: 'SERVICE', label: '서비스 이용' },
-  { value: 'TECHNICAL', label: '기술 문의' },
-  { value: 'ETC', label: '기타' },
+  { value: 'CHAT', label: '채팅' },
+  { value: 'RECOMMENDATION', label: '추천' },
+  { value: 'COMMUNITY', label: '커뮤니티' },
+  { value: 'PAYMENT', label: '결제' },
 ];
 
-/** 카테고리 한국어 라벨 매핑 */
+/** 카테고리 API 값 → 한국어 라벨 매핑 (목록/상세 표시용) */
 const CATEGORY_LABELS = {
+  GENERAL: '일반',
   ACCOUNT: '계정',
-  PAYMENT: '결제/포인트',
-  SERVICE: '서비스 이용',
-  TECHNICAL: '기술 문의',
-  ETC: '기타',
+  CHAT: '채팅',
+  RECOMMENDATION: '추천',
+  COMMUNITY: '커뮤니티',
+  PAYMENT: '결제',
 };
 
-/** 등록/수정 폼 초기값 */
+/**
+ * 등록/수정 폼 초기값.
+ * 기본 카테고리는 Backend enum 이 실제로 허용하는 값으로 설정해야 한다.
+ * (과거 'SERVICE' 였던 시기에 모든 FAQ 등록이 400 으로 실패했던 버그 수정)
+ */
 const INITIAL_FORM = {
-  category: 'SERVICE',
+  category: 'GENERAL',
   question: '',
   answer: '',
   isPublished: true,
 };
 
 export default function FaqTab() {
+  /* ── URL 쿼리파라미터 / AI prefill ── */
+  /**
+   * ?modal=create  → FAQ 등록 모달 자동 오픈
+   * AI 어시스턴트가 draft 를 location.state 에 심어두면 모달 초기값으로 주입.
+   * draft 필드명: category, question, answer, tags (현재 폼은 tags 미지원 → 무시)
+   */
+  const { modal: queryModal } = useQueryParams();
+  const { draft, bannerText } = useAiPrefill();
+
   /* ── 목록 상태 ── */
   const [faqs, setFaqs] = useState([]);
   const [total, setTotal] = useState(0);
@@ -83,6 +108,27 @@ export default function FaqTab() {
 
   useEffect(() => { loadFaqs(); }, [loadFaqs]);
 
+  /**
+   * ?modal=create 쿼리가 있으면 FAQ 등록 모달을 자동 오픈.
+   * draft 가 있으면 category/question/answer 필드를 초기값으로 주입.
+   * (tags 필드는 현재 FaqTab 폼에 없으므로 무시)
+   */
+  useEffect(() => {
+    if (queryModal !== 'create' || modalOpen) return;
+    const prefill = draft
+      ? {
+          ...INITIAL_FORM,
+          category:    draft.category ?? INITIAL_FORM.category,
+          question:    draft.question ?? INITIAL_FORM.question,
+          answer:      draft.answer   ?? INITIAL_FORM.answer,
+        }
+      : INITIAL_FORM;
+    setEditTarget(null);
+    setForm(prefill);
+    setModalOpen(true);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryModal]);
+
   /** 카테고리 필터 변경 — 첫 페이지로 리셋 */
   function handleCategoryChange(value) {
     setFilterCategory(value);
@@ -100,7 +146,8 @@ export default function FaqTab() {
   function openEditModal(faq) {
     setEditTarget(faq);
     setForm({
-      category: faq.category ?? 'SERVICE',
+      /* Backend SupportCategory enum 값을 그대로 사용. 기본값은 INITIAL_FORM 과 통일. */
+      category: faq.category ?? 'GENERAL',
       question: faq.question ?? '',
       answer: faq.answer ?? '',
       isPublished: faq.isPublished ?? true,
@@ -259,6 +306,9 @@ export default function FaqTab() {
             </ModalHeader>
 
             <ModalForm onSubmit={handleFormSubmit}>
+              {/* ── AI 어시스턴트 prefill 안내 배너 (draft 가 있을 때만 노출) ── */}
+              {bannerText && <AiPrefillBanner text={bannerText} />}
+
               <FormRow>
                 <Label>카테고리 *</Label>
                 <Select name="category" value={form.category} onChange={handleFormChange}>

@@ -1,10 +1,11 @@
 /**
  * 대시보드 메인 페이지.
  *
- * 3섹션 구조:
- * 1. KPI 카드   : 핵심 지표 6개 (회원/구독/결제/신고/AI 채팅)
- * 2. 추이 차트  : 신규 가입 + 활성 사용자 + 결제 금액 (7/14/30일)
- * 3. 최근 활동  : 최신 활동 피드 최대 20건
+ * 4섹션 구조:
+ * 1. KPI 카드     : 핵심 지표 6개 (회원/구독/결제/신고/AI 채팅)
+ * 2. 추이 차트    : 신규 가입 + 활성 사용자 + 결제 금액 (7/14/30일)
+ * 3. 서비스 현황  : 미니 차트 4개 (구독 분포/등급 분포/AI 의도/이탈 위험)
+ * 4. 최근 활동    : 최신 활동 피드 최대 20건
  *
  * 데이터 패칭 전략:
  * - Promise.allSettled로 3개 API를 병렬 호출
@@ -18,9 +19,16 @@ import { useState, useEffect, useCallback } from 'react';
 import styled from 'styled-components';
 import { MdRefresh } from 'react-icons/md';
 import { fetchKpi, fetchTrends, fetchRecentActivities } from '../api/dashboardApi';
+import {
+  fetchSubscription,
+  fetchGradeDistribution,
+  fetchAiIntentDistribution,
+  fetchChurnRiskOverview,
+} from '../../stats/api/statsApi';
 import KpiCards from '../components/KpiCards';
 import TrendChart from '../components/TrendChart';
 import RecentActivity from '../components/RecentActivity';
+import DashboardCharts from '../components/DashboardCharts';
 
 /** 기본 추이 기간: 7일 */
 const DEFAULT_DAYS = 7;
@@ -45,6 +53,15 @@ export default function DashboardPage() {
   const [activityLoading, setActivityLoading] = useState(true);
   const [activityError, setActivityError] = useState(null);
 
+  /* ── 미니 차트 데이터 상태 ── */
+  const [chartData, setChartData] = useState({
+    subscription: null,
+    grades: null,
+    intents: null,
+    churnRisk: null,
+  });
+  const [chartsLoading, setChartsLoading] = useState(true);
+
   /* ── 전체 마지막 갱신 시간 ── */
   const [lastUpdated, setLastUpdated] = useState(null);
 
@@ -59,15 +76,21 @@ export default function DashboardPage() {
     setKpiLoading(true);
     setTrendsLoading(true);
     setActivityLoading(true);
+    setChartsLoading(true);
     setKpiError(null);
     setTrendsError(null);
     setActivityError(null);
 
-    const [kpiResult, trendsResult, activityResult] = await Promise.allSettled([
-      fetchKpi(),
-      fetchTrends({ days }),
-      fetchRecentActivities({ size: ACTIVITY_SIZE }),
-    ]);
+    const [kpiResult, trendsResult, activityResult, subResult, gradeResult, intentResult, churnResult] =
+      await Promise.allSettled([
+        fetchKpi(),
+        fetchTrends({ days }),
+        fetchRecentActivities({ size: ACTIVITY_SIZE }),
+        fetchSubscription(),
+        fetchGradeDistribution(),
+        fetchAiIntentDistribution(),
+        fetchChurnRiskOverview(),
+      ]);
 
     /* KPI 처리 */
     if (kpiResult.status === 'fulfilled') {
@@ -92,6 +115,15 @@ export default function DashboardPage() {
       setActivityError(activityResult.reason?.message ?? '최근 활동을 불러올 수 없습니다.');
     }
     setActivityLoading(false);
+
+    /* 미니 차트 데이터 처리 — 개별 실패해도 나머지 표시 */
+    setChartData({
+      subscription: subResult.status === 'fulfilled' ? subResult.value : null,
+      grades: gradeResult.status === 'fulfilled' ? gradeResult.value : null,
+      intents: intentResult.status === 'fulfilled' ? intentResult.value : null,
+      churnRisk: churnResult.status === 'fulfilled' ? churnResult.value : null,
+    });
+    setChartsLoading(false);
 
     /* 마지막 갱신 시간 기록 */
     setLastUpdated(new Date());
@@ -207,7 +239,19 @@ export default function DashboardPage() {
         />
       </Section>
 
-      {/* ── 섹션 3: 최근 활동 ── */}
+      {/* ── 섹션 3: 서비스 현황 미니 차트 (4개) ── */}
+      <Section>
+        <SectionLabel>서비스 현황</SectionLabel>
+        <DashboardCharts
+          subscription={chartData.subscription}
+          grades={chartData.grades}
+          intents={chartData.intents}
+          churnRisk={chartData.churnRisk}
+          loading={chartsLoading}
+        />
+      </Section>
+
+      {/* ── 섹션 4: 최근 활동 ── */}
       <Section>
         <SectionLabel>최근 활동</SectionLabel>
         {activityError && <SectionError>{activityError}</SectionError>}

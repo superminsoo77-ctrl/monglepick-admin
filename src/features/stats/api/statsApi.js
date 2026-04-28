@@ -156,3 +156,136 @@ export function fetchRevenue(params) {
 export function fetchSubscription() {
   return backendApi.get(`${STATS}/subscription`);
 }
+
+// ══════════════════════════════════════════════
+// 포인트 경제 분석
+// ══════════════════════════════════════════════
+
+/** 포인트 경제 개요 KPI (총발행/소비/잔액/활성사용자/오늘) */
+export function fetchPointEconomyOverview() {
+  return backendApi.get(`${STATS}/point-economy/overview`);
+}
+
+/** 포인트 유형별 분포 (earn/spend/bonus/expire/refund/revoke) */
+export function fetchPointTypeDistribution() {
+  return backendApi.get(`${STATS}/point-economy/distribution`);
+}
+
+/** 등급별 사용자 분포 (6등급) */
+export function fetchGradeDistribution() {
+  return backendApi.get(`${STATS}/point-economy/grades`);
+}
+
+/** 일별 포인트 발행/소비 추이 */
+export function fetchPointTrends(params) {
+  return backendApi.get(`${STATS}/point-economy/trends`, { params });
+}
+
+// ══════════════════════════════════════════════
+// AI 서비스 분석
+// ══════════════════════════════════════════════
+
+/** AI 서비스 개요 KPI (세션/턴/평균/오늘) */
+export function fetchAiServiceOverview() {
+  return backendApi.get(`${STATS}/ai-service/overview`);
+}
+
+/** AI 세션 일별 추이 */
+export function fetchAiSessionTrends(params) {
+  return backendApi.get(`${STATS}/ai-service/trends`, { params });
+}
+
+/** AI 의도(Intent) 분포 */
+export function fetchAiIntentDistribution() {
+  return backendApi.get(`${STATS}/ai-service/intents`);
+}
+
+/** AI 쿼터 소진 현황 */
+export function fetchAiQuotaStats() {
+  return backendApi.get(`${STATS}/ai-service/quota`);
+}
+
+// ══════════════════════════════════════════════
+// 커뮤니티 분석
+// ══════════════════════════════════════════════
+
+/** 커뮤니티 개요 KPI (게시글/댓글/신고/오늘) */
+export function fetchCommunityOverview() {
+  return backendApi.get(`${STATS}/community/overview`);
+}
+
+/** 커뮤니티 일별 추이 */
+export function fetchCommunityTrends(params) {
+  return backendApi.get(`${STATS}/community/trends`, { params });
+}
+
+/** 게시글 카테고리별 분포 */
+export function fetchPostCategoryDistribution() {
+  return backendApi.get(`${STATS}/community/categories`);
+}
+
+/** 신고/독성 분석 */
+export function fetchReportAnalysis() {
+  return backendApi.get(`${STATS}/community/reports`);
+}
+
+// ══════════════════════════════════════════════
+// 사용자 참여도 분석
+// ══════════════════════════════════════════════
+
+/** 사용자 참여도 개요 KPI (출석/활동/위시리스트) */
+export function fetchEngagementOverview() {
+  return backendApi.get(`${STATS}/engagement/overview`);
+}
+
+/** 활동별 참여 현황 분포 */
+export function fetchActivityDistribution() {
+  return backendApi.get(`${STATS}/engagement/activity-distribution`);
+}
+
+/** 출석 연속일 구간 분포 */
+export function fetchAttendanceStreak() {
+  return backendApi.get(`${STATS}/engagement/attendance-streak`);
+}
+
+// ══════════════════════════════════════════════
+// 콘텐츠 성과 분석
+// ══════════════════════════════════════════════
+
+/** 콘텐츠 성과 개요 KPI (코스/업적/퀴즈) */
+export function fetchContentPerformanceOverview() {
+  return backendApi.get(`${STATS}/content-performance/overview`);
+}
+
+/** 코스별 완주율 */
+export function fetchCourseCompletion() {
+  return backendApi.get(`${STATS}/content-performance/course-completion`);
+}
+
+/** 리뷰 품질 지표 (카테고리별/평점 분포) */
+export function fetchReviewQuality() {
+  return backendApi.get(`${STATS}/content-performance/review-quality`);
+}
+
+// ══════════════════════════════════════════════
+// 전환 퍼널 분석
+// ══════════════════════════════════════════════
+
+/** 6단계 전환 퍼널 (가입→활동→AI→리뷰→구독→결제) */
+export function fetchConversionFunnel(params) {
+  return backendApi.get(`${STATS}/funnel/conversion`, { params });
+}
+
+// ══════════════════════════════════════════════
+// 이탈 위험 분석
+// ══════════════════════════════════════════════
+
+/** 이탈 위험 개요 (위험 등급별 사용자 분포) */
+export function fetchChurnRiskOverview() {
+  return backendApi.get(`${STATS}/churn-risk/overview`);
+}
+
+/** 이탈 위험 신호 집계 (미로그인/포인트0/구독만료 등) */
+export function fetchChurnRiskSignals() {
+  return backendApi.get(`${STATS}/churn-risk/signals`);
+}

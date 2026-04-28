@@ -1,12 +1,19 @@
 /**
  * 통계/분석 관리자 탭 메인 페이지.
  *
- * 5개 서브탭으로 구성:
- * - 서비스 통계 : DAU/MAU, 신규 가입, 리뷰, 게시글 KPI + 추이 차트
- * - 추천 분석   : CTR, 만족도, 장르 분포, 추천 로그 테이블
- * - 검색 분석   : 검색 품질 지표, 인기 검색어 테이블
- * - 사용자 행동 : 장르 선호 차트, 시간대별 활동, 코호트 리텐션
- * - 매출        : 월매출/MRR/ARPU, 일별 매출 차트, 구독 분포
+ * 12개 서브탭으로 구성:
+ * - 서비스 통계   : DAU/MAU, 신규 가입, 리뷰, 게시글 KPI + 추이 차트
+ * - 추천 분석     : CTR, 만족도, 장르 분포, 추천 로그 테이블
+ * - 검색 분석     : 검색 품질 지표, 인기 검색어 테이블
+ * - 사용자 행동   : 장르 선호 차트, 시간대별 활동, 코호트 리텐션
+ * - 매출          : 월매출/MRR/ARPU, 일별 매출 차트, 구독 분포
+ * - 포인트 경제   : 포인트 유통량, 유형별 분포, 등급별 분포, 발행/소비 추이
+ * - AI 서비스     : 세션/턴 추이, 의도 분포, 쿼터 소진율
+ * - 커뮤니티      : 게시글/댓글 추이, 카테고리 분포, 신고/독성 분석
+ * - 사용자 참여도 : 출석 패턴, 활동별 참여율, 위시리스트 분석
+ * - 콘텐츠 성과   : 코스 완주율, 업적 달성률, 리뷰 품질
+ * - 전환 퍼널     : 가입→활동→AI→리뷰→구독→결제 6단계 전환율
+ * - 이탈 위험     : 로그인/활동/포인트/구독 기반 이탈 위험 스코어링
  *
  * 탭 전환 전략:
  * - SupportPage와 동일하게 activeTab 상태 + 조건부 렌더링 방식 사용.
@@ -22,14 +29,28 @@ import RecommendationTab from '../components/RecommendationTab';
 import SearchTab from '../components/SearchTab';
 import BehaviorTab from '../components/BehaviorTab';
 import RevenueTab from '../components/RevenueTab';
+import PointEconomyTab from '../components/PointEconomyTab';
+import AiServiceTab from '../components/AiServiceTab';
+import CommunityTab from '../components/CommunityTab';
+import EngagementTab from '../components/EngagementTab';
+import ContentPerformanceTab from '../components/ContentPerformanceTab';
+import ConversionFunnelTab from '../components/ConversionFunnelTab';
+import ChurnRiskTab from '../components/ChurnRiskTab';
 
-/** 서브탭 정의 */
+/** 서브탭 정의 (12개) */
 const TABS = [
-  { key: 'service',        label: '서비스 통계' },
-  { key: 'recommendation', label: '추천 분석' },
-  { key: 'search',         label: '검색 분석' },
-  { key: 'behavior',       label: '사용자 행동' },
-  { key: 'revenue',        label: '매출' },
+  { key: 'service',            label: '서비스 통계' },
+  { key: 'recommendation',     label: '추천 분석' },
+  { key: 'search',             label: '검색 분석' },
+  { key: 'behavior',           label: '사용자 행동' },
+  { key: 'revenue',            label: '매출' },
+  { key: 'pointEconomy',       label: '포인트 경제' },
+  { key: 'aiService',          label: 'AI 서비스' },
+  { key: 'community',          label: '커뮤니티' },
+  { key: 'engagement',         label: '사용자 참여도' },
+  { key: 'contentPerformance', label: '콘텐츠 성과' },
+  { key: 'conversionFunnel',   label: '전환 퍼널' },
+  { key: 'churnRisk',          label: '이탈 위험' },
 ];
 
 export default function StatsPage() {
@@ -60,7 +81,7 @@ export default function StatsPage() {
       <PageHeader>
         <PageTitle>통계 / 분석</PageTitle>
         <PageDesc>
-          서비스 KPI, AI 추천 성과, 검색 품질, 사용자 행동 패턴, 매출 현황을 확인합니다.
+          서비스 KPI, 추천/검색/사용자 행동, 매출, 포인트 경제, AI 서비스, 커뮤니티, 참여도, 콘텐츠 성과, 전환 퍼널, 이탈 위험 분석을 확인합니다.
         </PageDesc>
       </PageHeader>
 
@@ -107,6 +128,41 @@ export default function StatsPage() {
         {/* 매출 */}
         <TabContent $visible={activeTab === 'revenue'}>
           {visitedRef.current.has('revenue') && <RevenueTab />}
+        </TabContent>
+
+        {/* 포인트 경제 */}
+        <TabContent $visible={activeTab === 'pointEconomy'}>
+          {visitedRef.current.has('pointEconomy') && <PointEconomyTab />}
+        </TabContent>
+
+        {/* AI 서비스 */}
+        <TabContent $visible={activeTab === 'aiService'}>
+          {visitedRef.current.has('aiService') && <AiServiceTab />}
+        </TabContent>
+
+        {/* 커뮤니티 */}
+        <TabContent $visible={activeTab === 'community'}>
+          {visitedRef.current.has('community') && <CommunityTab />}
+        </TabContent>
+
+        {/* 사용자 참여도 */}
+        <TabContent $visible={activeTab === 'engagement'}>
+          {visitedRef.current.has('engagement') && <EngagementTab />}
+        </TabContent>
+
+        {/* 콘텐츠 성과 */}
+        <TabContent $visible={activeTab === 'contentPerformance'}>
+          {visitedRef.current.has('contentPerformance') && <ContentPerformanceTab />}
+        </TabContent>
+
+        {/* 전환 퍼널 */}
+        <TabContent $visible={activeTab === 'conversionFunnel'}>
+          {visitedRef.current.has('conversionFunnel') && <ConversionFunnelTab />}
+        </TabContent>
+
+        {/* 이탈 위험 */}
+        <TabContent $visible={activeTab === 'churnRisk'}>
+          {visitedRef.current.has('churnRisk') && <ChurnRiskTab />}
         </TabContent>
       </TabPanel>
     </Wrapper>

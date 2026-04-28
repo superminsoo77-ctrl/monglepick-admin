@@ -1,16 +1,24 @@
 /**
  * 챗봇 로그 뷰어 컴포넌트.
- * 좌측: 세션 목록 (키워드 검색 + 페이징).
+ * 좌측: 세션 목록 (사용자 필터 + 페이징).
  * 우측: 선택된 세션의 메시지 상세 뷰 (사용자/AI 말풍선 형태).
  * 상단: 챗봇 사용 통계 3종 (총 세션, 총 메시지, 평균 대화 턴).
+ *
+ * 변경 이력:
+ * - 2026-04-14: 좌측 검색창을 텍스트 keyword(`사용자 ID / 세션 ID`) 입력에서
+ *   UserSearchPicker(이메일/닉네임 Autocomplete)로 교체.
+ *   배경: 백엔드 컨트롤러는 그동안 keyword 파라미터를 받지도 않아서 입력해도 무시되고
+ *   있었음(dead UX). 이번 작업으로 백엔드에 `userId` 필터를 추가하고 프론트는
+ *   사용자 선택 → userId 추출 → API 전달의 정상 동작 경로로 정리.
  *
  * @param {Object} props - 없음 (자체 데이터 fetch)
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import styled from 'styled-components';
-import { MdRefresh, MdSearch, MdChevronLeft, MdChevronRight, MdPerson, MdSmartToy } from 'react-icons/md';
+import { MdRefresh, MdChevronLeft, MdChevronRight, MdPerson, MdSmartToy } from 'react-icons/md';
 import StatsCard from '@/shared/components/StatsCard';
+import UserSearchPicker from '@/shared/components/UserSearchPicker';
 import { fetchChatSessions, fetchChatMessages, fetchChatStats } from '../api/aiApi';
 
 export default function ChatLogViewer() {
@@ -18,11 +26,17 @@ export default function ChatLogViewer() {
   const [stats, setStats] = useState(null);
   const [statsLoading, setStatsLoading] = useState(true);
 
-  /* ── 세션 목록 상태 ── */
+  /* ── 세션 목록 상태 ──
+   *
+   * selectedUser: UserSearchPicker 에서 선택된 사용자 객체 ({ userId, email, nickname }).
+   *               null 이면 사용자 필터 해제 → 전체 세션 조회.
+   *               백엔드(GET /admin/ai/chat/sessions?userId=) 가 userId 필터를 지원하므로
+   *               loadSessions 에서 selectedUser?.userId 를 추출해 전달한다.
+   */
   const [sessions, setSessions] = useState([]);
   const [totalPages, setTotalPages] = useState(0);
   const [page, setPage] = useState(0);
-  const [keyword, setKeyword] = useState('');
+  const [selectedUser, setSelectedUser] = useState(null);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [sessionsError, setSessionsError] = useState(null);
 
@@ -34,9 +48,6 @@ export default function ChatLogViewer() {
 
   /* 메시지 스크롤 ref */
   const msgEndRef = useRef(null);
-
-  /* 검색 디바운스 타이머 */
-  const searchTimer = useRef(null);
 
   /** 통계 조회 */
   const loadStats = useCallback(async () => {
@@ -51,15 +62,23 @@ export default function ChatLogViewer() {
     }
   }, []);
 
-  /** 세션 목록 조회 */
-  const loadSessions = useCallback(async (pageNum = 0, kw = keyword) => {
+  /**
+   * 세션 목록 조회.
+   *
+   * @param {number}  pageNum         - 0-based 페이지 번호
+   * @param {?Object} userOverride    - 호출 시점에 명시할 사용자 (undefined 면 현재 selectedUser 사용)
+   *                                    null 이면 명시적으로 사용자 필터 해제 의도.
+   */
+  const loadSessions = useCallback(async (pageNum = 0, userOverride = undefined) => {
     setSessionsLoading(true);
     setSessionsError(null);
+    /* userOverride 가 undefined 면 selectedUser 사용, null 이면 명시적 해제 */
+    const targetUser = userOverride === undefined ? selectedUser : userOverride;
     try {
       const result = await fetchChatSessions({
         page: pageNum,
         size: 20,
-        keyword: kw || undefined,
+        userId: targetUser?.userId || undefined,
       });
       setSessions(result?.content ?? []);
       setTotalPages(result?.totalPages ?? 0);
@@ -69,7 +88,7 @@ export default function ChatLogViewer() {
     } finally {
       setSessionsLoading(false);
     }
-  }, [keyword]);
+  }, [selectedUser]);
 
   /* 초기 로드 */
   useEffect(() => {
@@ -82,19 +101,15 @@ export default function ChatLogViewer() {
     msgEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  /* 언마운트 시 타이머 정리 */
-  useEffect(() => {
-    return () => {
-      if (searchTimer.current) clearTimeout(searchTimer.current);
-    };
-  }, []);
-
-  /** 키워드 변경 — 디바운스 400ms */
-  function handleKeywordChange(e) {
-    const val = e.target.value;
-    setKeyword(val);
-    if (searchTimer.current) clearTimeout(searchTimer.current);
-    searchTimer.current = setTimeout(() => loadSessions(0, val), 400);
+  /**
+   * UserSearchPicker 의 onChange 핸들러.
+   * 사용자 선택/해제 시 첫 페이지로 돌아가고 새 필터로 즉시 재조회한다.
+   * @param {?Object} user - 선택된 사용자 ({ userId, email, nickname }) 또는 null
+   */
+  function handleUserChange(user) {
+    setSelectedUser(user);
+    /* setSelectedUser 는 비동기이므로 즉시 반영을 위해 user 를 명시 전달 */
+    loadSessions(0, user ?? null);
   }
 
   /** 세션 선택 → 메시지 로드 */
@@ -105,7 +120,17 @@ export default function ChatLogViewer() {
     setMessagesLoading(true);
     try {
       const result = await fetchChatMessages(session.sessionId ?? session.id);
-      setMessages(Array.isArray(result) ? result : result?.messages ?? []);
+      // ChatSessionDetail.messages 는 JSON 문자열(DB TEXT 컬럼)이므로 파싱 필요.
+      // 배열 직접 반환, 객체 내 messages 필드(문자열 또는 배열), 기타 케이스를 모두 처리.
+      let parsed = [];
+      if (Array.isArray(result)) {
+        parsed = result;
+      } else if (typeof result?.messages === 'string') {
+        try { parsed = JSON.parse(result.messages); } catch { parsed = []; }
+      } else if (Array.isArray(result?.messages)) {
+        parsed = result.messages;
+      }
+      setMessages(Array.isArray(parsed) ? parsed : []);
     } catch (err) {
       setMessagesError(err.message);
     } finally {
@@ -153,15 +178,16 @@ export default function ChatLogViewer() {
       <ContentGrid>
         {/* ── 좌측: 세션 목록 ── */}
         <SessionPanel>
-          <SearchWrapper>
-            <MdSearch size={15} />
-            <SearchInput
-              type="text"
-              placeholder="사용자 ID / 세션 ID 검색"
-              value={keyword}
-              onChange={handleKeywordChange}
+          {/* 사용자 선택 픽커 — 이메일/닉네임으로 검색해 사용자를 선택하면
+              해당 사용자의 채팅 세션만 좌측 리스트에 표시된다.
+              백엔드 GET /admin/ai/chat/sessions?userId= 가 필터를 처리. */}
+          <PickerWrapper>
+            <UserSearchPicker
+              selectedUser={selectedUser}
+              onChange={handleUserChange}
+              placeholder="이메일 또는 닉네임으로 사용자 검색"
             />
-          </SearchWrapper>
+          </PickerWrapper>
 
           {sessionsError && <ErrorMsg>{sessionsError}</ErrorMsg>}
 
@@ -340,23 +366,19 @@ const SessionPanel = styled.div`
   overflow: hidden;
 `;
 
-const SearchWrapper = styled.div`
-  display: flex;
-  align-items: center;
-  gap: ${({ theme }) => theme.spacing.sm};
+/**
+ * UserSearchPicker 를 좌측 세션 패널 상단에 끼워 넣기 위한 래퍼.
+ *
+ * UserSearchPicker 자체는 max-width 420px 의 독립 컨테이너이므로
+ * 패널 폭(320px)에 맞도록 래퍼에서 100% 로 늘리고 패딩으로 분리선만 부여한다.
+ */
+const PickerWrapper = styled.div`
   padding: ${({ theme }) => theme.spacing.md} ${({ theme }) => theme.spacing.lg};
   border-bottom: 1px solid ${({ theme }) => theme.colors.border};
-  color: ${({ theme }) => theme.colors.textMuted};
-`;
 
-const SearchInput = styled.input`
-  flex: 1;
-  font-size: ${({ theme }) => theme.fontSizes.sm};
-  background: transparent;
-  color: ${({ theme }) => theme.colors.textPrimary};
-  border: none;
-  outline: none;
-  &::placeholder { color: ${({ theme }) => theme.colors.textMuted}; }
+  & > div {
+    max-width: 100%;
+  }
 `;
 
 const SessionList = styled.div`

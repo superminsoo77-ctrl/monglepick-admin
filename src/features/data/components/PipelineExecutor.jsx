@@ -1,10 +1,15 @@
 /**
  * 파이프라인 실행 컴포넌트.
- * 9개 작업 선택 드롭다운 + 옵션 설정 + 실행/취소 버튼.
- * 실행 중에는 SSE 로그 스트림을 EventSource로 구독하여 실시간 표시.
- * 30초마다 상태 polling으로 진행률 동기화.
+ * Agent admin_data.py 의 9개 작업 목록을 서버에서 받아 드롭다운으로 선택하고,
+ * 실행/취소·SSE 로그 스트림·상태 polling 을 job-id 기반으로 처리한다.
  *
- * @param {Object} props - 없음 (자체 상태 관리)
+ * 2026-04-15 재정비:
+ *  - 작업 코드를 서버(`GET /admin/pipeline`)에서 로드 → 프론트/Agent 불일치 제거.
+ *  - run 응답에서 `job_id` 를 받아 cancel/logs 에 일관되게 전달.
+ *  - `GET /admin/pipeline/history?status=RUNNING` 로 현재 진행 중 작업을 확인.
+ *  - Agent 는 `{task_code, args[]}` 만 허용하므로, UI 옵션(clear_db/resume)은
+ *    CLI 플래그로 변환하여 전송.
+ *  - Agent 미제공이던 checkpoint 조회는 제거 (이력 탭에서 이전 실행 결과 확인).
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -12,49 +17,47 @@ import styled from 'styled-components';
 import { MdPlayArrow, MdStop, MdRefresh, MdExpandMore } from 'react-icons/md';
 import StatusBadge from '@/shared/components/StatusBadge';
 import {
+  fetchPipelineTasks,
   runPipeline,
   cancelPipeline,
-  fetchPipelineStatus,
-  fetchPipelineCheckpoint,
+  fetchActivePipelineJob,
   getPipelineLogUrl,
 } from '../api/dataApi';
 import { SERVICE_URLS } from '@/shared/api/serviceUrls';
 
-/** 실행 가능한 파이프라인 작업 9개 */
-const PIPELINE_TASKS = [
-  { value: 'full_reload', label: '전체 재적재', desc: '5DB 모두 클리어 후 재적재 (장시간)' },
-  { value: 'tmdb_collect', label: 'TMDB 수집', desc: 'TMDB 신규 영화 수집 및 업데이트' },
-  { value: 'kobis_collect', label: 'KOBIS 수집', desc: 'KOBIS 영화 정보 수집' },
-  { value: 'kmdb_collect', label: 'KMDb 수집', desc: 'KMDb 한국영화 정보 수집' },
-  { value: 'embed_upsert', label: '임베딩 적재', desc: 'Solar 임베딩 생성 후 Qdrant 업서트' },
-  { value: 'neo4j_sync', label: 'Neo4j 동기화', desc: 'MySQL → Neo4j 그래프 동기화' },
-  { value: 'es_index', label: 'ES 인덱싱', desc: 'Elasticsearch 인덱스 재구축' },
-  { value: 'mood_enrich', label: '무드태그 보강', desc: 'Solar Pro로 무드태그 일괄 생성' },
-  { value: 'resume', label: '중단 재개', desc: '마지막 체크포인트부터 재개' },
-];
-
-/** 파이프라인 상태 → 뱃지 매핑 */
+/** 파이프라인 상태 → 뱃지 매핑 (Agent 는 대문자 상태를 반환: RUNNING/SUCCESS/FAILED/CANCELLED) */
 function getPipelineStatusBadge(status) {
   switch (status) {
-    case 'running':  return { status: 'info',    label: '실행 중' };
-    case 'done':
-    case 'success':  return { status: 'success', label: '완료' };
-    case 'failed':
-    case 'error':    return { status: 'error',   label: '오류' };
-    case 'cancelled':return { status: 'warning', label: '취소됨' };
-    case 'idle':     return { status: 'default', label: '대기' };
-    default:         return { status: 'default', label: status ?? '대기' };
+    case 'RUNNING':   return { status: 'info',    label: '실행 중' };
+    case 'SUCCESS':   return { status: 'success', label: '완료' };
+    case 'FAILED':    return { status: 'error',   label: '오류' };
+    case 'CANCELLED': return { status: 'warning', label: '취소됨' };
+    case 'IDLE':
+    default:          return { status: 'default', label: status ? status : '대기' };
   }
 }
 
+/** clear_db / resume 옵션 → CLI 인자 변환 규칙 (Agent 가 subprocess 로 호출하는 스크립트 기준). */
+function buildPipelineArgs({ clearDb, resumeMode }) {
+  const args = [];
+  if (clearDb) args.push('--clear-db');
+  if (resumeMode) args.push('--resume');
+  return args;
+}
+
 export default function PipelineExecutor() {
+  /* ── 작업 메타 (서버에서 로드) ── */
+  const [tasks, setTasks] = useState([]);           // [{code, name, description, category}, ...]
+  const [tasksLoading, setTasksLoading] = useState(false);
+  const [tasksError, setTasksError] = useState(null);
+
   /* ── 작업 선택 상태 ── */
-  const [selectedTask, setSelectedTask] = useState('tmdb_collect');
+  const [selectedTask, setSelectedTask] = useState('');
   const [clearDb, setClearDb] = useState(false);
   const [resumeMode, setResumeMode] = useState(false);
 
   /* ── 실행 상태 ── */
-  const [pipelineStatus, setPipelineStatus] = useState(null); // API 응답
+  const [activeJob, setActiveJob] = useState(null); // {job_id, task_code, task_name, status, started_at}
   const [runLoading, setRunLoading] = useState(false);
   const [cancelLoading, setCancelLoading] = useState(false);
   const [statusError, setStatusError] = useState(null);
@@ -64,57 +67,61 @@ export default function PipelineExecutor() {
   const logEndRef = useRef(null);
   const eventSourceRef = useRef(null);
 
-  /* ── 체크포인트 ── */
-  const [checkpoint, setCheckpoint] = useState(null);
-
   /* ── polling 타이머 ── */
   const pollTimerRef = useRef(null);
 
-  /** 파이프라인 상태 1회 조회 */
-  const loadStatus = useCallback(async () => {
+  /** 9개 작업 메타 로드 (초기 1회) */
+  const loadTasks = useCallback(async () => {
+    setTasksLoading(true);
+    setTasksError(null);
     try {
-      const result = await fetchPipelineStatus();
-      setPipelineStatus(result);
+      const result = await fetchPipelineTasks();
+      const list = result?.tasks ?? [];
+      setTasks(list);
+      // 기본 선택: 첫 번째 작업
+      if (list.length > 0) setSelectedTask((prev) => prev || list[0].code);
+    } catch (err) {
+      setTasksError(err.message);
+    } finally {
+      setTasksLoading(false);
+    }
+  }, []);
+
+  /** 현재 실행 중 작업 1회 조회 */
+  const loadActiveJob = useCallback(async () => {
+    try {
+      const job = await fetchActivePipelineJob();
+      setActiveJob(job);
       setStatusError(null);
     } catch (err) {
       setStatusError(err.message);
     }
   }, []);
 
-  /** 체크포인트 조회 */
-  const loadCheckpoint = useCallback(async () => {
-    try {
-      const result = await fetchPipelineCheckpoint();
-      setCheckpoint(result);
-    } catch {
-      // 체크포인트 없으면 무시
-    }
-  }, []);
-
   /* 초기 로드 */
   useEffect(() => {
-    loadStatus();
-    loadCheckpoint();
-  }, [loadStatus, loadCheckpoint]);
+    loadTasks();
+    loadActiveJob();
+  }, [loadTasks, loadActiveJob]);
 
   /* 실행 중일 때 30초 polling */
   useEffect(() => {
-    if (pipelineStatus?.status === 'running') {
-      pollTimerRef.current = setInterval(loadStatus, 30000);
-    } else {
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    if (activeJob?.status === 'RUNNING') {
+      pollTimerRef.current = setInterval(loadActiveJob, 30000);
+    } else if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
     }
     return () => {
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     };
-  }, [pipelineStatus?.status, loadStatus]);
+  }, [activeJob?.status, loadActiveJob]);
 
   /* 로그 자동 스크롤 */
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
 
-  /* 컴포넌트 언마운트 시 SSE 연결 정리 */
+  /* 컴포넌트 언마운트 시 SSE / 타이머 정리 */
   useEffect(() => {
     return () => {
       if (eventSourceRef.current) {
@@ -125,23 +132,25 @@ export default function PipelineExecutor() {
     };
   }, []);
 
-  /** SSE 로그 스트림 구독 시작 */
-  function subscribeLogStream() {
+  /** 특정 job 의 SSE 로그 스트림 구독 시작 */
+  function subscribeLogStream(jobId) {
+    if (!jobId) return;
     // 기존 연결 정리
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
     }
-    const url = `${SERVICE_URLS.AGENT}${getPipelineLogUrl()}`;
+    const url = `${SERVICE_URLS.AGENT}${getPipelineLogUrl(jobId)}`;
     const es = new EventSource(url, { withCredentials: false });
 
-    es.onmessage = (e) => {
-      setLogs((prev) => [...prev.slice(-500), e.data]); // 최대 500줄 유지
-    };
+    // Agent 는 `log` / `ping` / `done` 커스텀 이벤트로 내려주므로 addEventListener 로 받는다.
+    es.addEventListener('log', (e) => {
+      setLogs((prev) => [...prev.slice(-500), e.data]);
+    });
 
     es.addEventListener('done', () => {
       es.close();
       eventSourceRef.current = null;
-      loadStatus();
+      loadActiveJob();
     });
 
     es.onerror = () => {
@@ -154,22 +163,26 @@ export default function PipelineExecutor() {
 
   /** 파이프라인 실행 */
   async function handleRun() {
+    if (!selectedTask) return;
     setRunLoading(true);
     setLogs([]);
     try {
-      const payload = {
-        task: selectedTask,
-        options: {
-          clear_db: clearDb,
-          resume: resumeMode,
-        },
-      };
-      await runPipeline(payload);
-      setLogs([`[시작] ${PIPELINE_TASKS.find((t) => t.value === selectedTask)?.label} 파이프라인 실행`]);
+      const args = buildPipelineArgs({ clearDb, resumeMode });
+      const result = await runPipeline({ task_code: selectedTask, args });
+      const jobId = result?.job_id;
+      const taskMeta = tasks.find((t) => t.code === selectedTask);
+      setLogs([
+        `[시작] ${taskMeta?.name ?? selectedTask} 파이프라인 실행 (job_id=${jobId})`,
+      ]);
+      setActiveJob({
+        job_id: jobId,
+        task_code: selectedTask,
+        task_name: taskMeta?.name,
+        status: 'RUNNING',
+        started_at: result?.started_at,
+      });
       // SSE 로그 구독
-      subscribeLogStream();
-      // 상태 즉시 갱신
-      await loadStatus();
+      subscribeLogStream(jobId);
     } catch (err) {
       setLogs([`[오류] ${err.message}`]);
     } finally {
@@ -179,15 +192,16 @@ export default function PipelineExecutor() {
 
   /** 파이프라인 취소 */
   async function handleCancel() {
+    if (!activeJob?.job_id) return;
     setCancelLoading(true);
     try {
-      await cancelPipeline();
+      await cancelPipeline(activeJob.job_id);
       setLogs((prev) => [...prev, '[취소] 파이프라인 취소 요청 전송']);
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;
       }
-      await loadStatus();
+      await loadActiveJob();
     } catch (err) {
       setLogs((prev) => [...prev, `[오류] 취소 실패: ${err.message}`]);
     } finally {
@@ -195,21 +209,21 @@ export default function PipelineExecutor() {
     }
   }
 
-  const isRunning = pipelineStatus?.status === 'running';
-  const progressPct = pipelineStatus?.progress ?? 0;
-  const badge = getPipelineStatusBadge(pipelineStatus?.status);
-  const selectedTaskMeta = PIPELINE_TASKS.find((t) => t.value === selectedTask);
+  const isRunning = activeJob?.status === 'RUNNING';
+  const badge = getPipelineStatusBadge(activeJob?.status ?? 'IDLE');
+  const selectedTaskMeta = tasks.find((t) => t.code === selectedTask);
 
   return (
     <Section>
       <SectionHeader>
         <SectionTitle>파이프라인 실행</SectionTitle>
-        <RefreshButton onClick={loadStatus} title="상태 새로고침">
+        <RefreshButton onClick={loadActiveJob} title="상태 새로고침">
           <MdRefresh size={16} />
         </RefreshButton>
       </SectionHeader>
 
       {statusError && <ErrorMsg>상태 조회 오류: {statusError}</ErrorMsg>}
+      {tasksError && <ErrorMsg>작업 목록 로드 오류: {tasksError}</ErrorMsg>}
 
       {/* 현재 파이프라인 상태 카드 */}
       <StatusCard>
@@ -218,39 +232,25 @@ export default function PipelineExecutor() {
           <StatusBadge status={badge.status} label={badge.label} />
         </StatusRow>
 
-        {pipelineStatus?.currentStep && (
+        {activeJob?.task_name && (
           <StatusRow>
-            <StatusLabel>진행 단계</StatusLabel>
-            <StatusValue>{pipelineStatus.currentStep}</StatusValue>
+            <StatusLabel>실행 중 작업</StatusLabel>
+            <StatusValue>{activeJob.task_name}</StatusValue>
           </StatusRow>
         )}
 
-        {isRunning && (
-          <>
-            <StatusRow>
-              <StatusLabel>진행률</StatusLabel>
-              <StatusValue>{progressPct}%</StatusValue>
-            </StatusRow>
-            <ProgressBar>
-              <ProgressFill $pct={progressPct} />
-            </ProgressBar>
-          </>
+        {activeJob?.job_id && (
+          <StatusRow>
+            <StatusLabel>Job ID</StatusLabel>
+            <StatusValue>{activeJob.job_id}</StatusValue>
+          </StatusRow>
         )}
 
-        {pipelineStatus?.startedAt && (
+        {activeJob?.started_at && (
           <StatusRow>
             <StatusLabel>시작 시각</StatusLabel>
             <StatusValue>
-              {new Date(pipelineStatus.startedAt).toLocaleString('ko-KR')}
-            </StatusValue>
-          </StatusRow>
-        )}
-
-        {checkpoint && (
-          <StatusRow>
-            <StatusLabel>체크포인트</StatusLabel>
-            <StatusValue>
-              {checkpoint.task} — {checkpoint.processedCount?.toLocaleString()}건 처리됨
+              {new Date(activeJob.started_at).toLocaleString('ko-KR')}
             </StatusValue>
           </StatusRow>
         )}
@@ -265,10 +265,16 @@ export default function PipelineExecutor() {
             <TaskSelect
               value={selectedTask}
               onChange={(e) => setSelectedTask(e.target.value)}
+              disabled={tasksLoading || tasks.length === 0}
             >
-              {PIPELINE_TASKS.map((task) => (
-                <option key={task.value} value={task.value}>
-                  {task.label}
+              {tasks.length === 0 && (
+                <option value="">
+                  {tasksLoading ? '작업 목록 로딩 중...' : '사용 가능한 작업 없음'}
+                </option>
+              )}
+              {tasks.map((task) => (
+                <option key={task.code} value={task.code}>
+                  {task.name}
                 </option>
               ))}
             </TaskSelect>
@@ -276,7 +282,7 @@ export default function PipelineExecutor() {
           </TaskSelectWrapper>
 
           {selectedTaskMeta && (
-            <TaskDesc>{selectedTaskMeta.desc}</TaskDesc>
+            <TaskDesc>{selectedTaskMeta.description}</TaskDesc>
           )}
 
           <OptionRow>
@@ -287,7 +293,7 @@ export default function PipelineExecutor() {
               onChange={(e) => setClearDb(e.target.checked)}
             />
             <CheckLabel htmlFor="opt-clear-db">
-              DB 초기화 후 실행 (full_reload 전용, 주의)
+              DB 초기화 후 실행 (--clear-db, full_reload 전용)
             </CheckLabel>
           </OptionRow>
 
@@ -299,12 +305,11 @@ export default function PipelineExecutor() {
               onChange={(e) => setResumeMode(e.target.checked)}
             />
             <CheckLabel htmlFor="opt-resume">
-              체크포인트부터 재개
-              {checkpoint && ` (${checkpoint.processedCount?.toLocaleString()}건 완료)`}
+              체크포인트부터 재개 (--resume)
             </CheckLabel>
           </OptionRow>
 
-          <RunButton onClick={handleRun} disabled={runLoading}>
+          <RunButton onClick={handleRun} disabled={runLoading || !selectedTask}>
             <MdPlayArrow size={18} />
             {runLoading ? '시작 중...' : '실행'}
           </RunButton>
@@ -410,22 +415,6 @@ const StatusValue = styled.span`
   font-family: ${({ theme }) => theme.fonts.mono};
 `;
 
-const ProgressBar = styled.div`
-  height: 6px;
-  background: ${({ theme }) => theme.colors.bgHover};
-  border-radius: 3px;
-  margin-top: ${({ theme }) => theme.spacing.sm};
-  overflow: hidden;
-`;
-
-const ProgressFill = styled.div`
-  height: 100%;
-  width: ${({ $pct }) => `${$pct}%`};
-  background: ${({ theme }) => theme.colors.primary};
-  border-radius: 3px;
-  transition: width 0.5s ease;
-`;
-
 const ConfigArea = styled.div`
   background: ${({ theme }) => theme.colors.bgCard};
   border: 1px solid ${({ theme }) => theme.colors.border};
@@ -457,6 +446,7 @@ const TaskSelect = styled.select`
   color: ${({ theme }) => theme.colors.textPrimary};
   appearance: none;
   cursor: pointer;
+  &:disabled { opacity: 0.5; cursor: not-allowed; }
 `;
 
 const SelectIcon = styled.div`

@@ -19,8 +19,11 @@ import {
   MdRefresh,
   MdPerson,
   MdOpenInNew,
+  MdBlock,
+  MdCheckCircle,
+  MdClose,
 } from 'react-icons/md';
-import { fetchUsers } from '../api/usersApi';
+import { fetchUsers, suspendUser, activateUser } from '../api/usersApi';
 import StatusBadge from '@/shared/components/StatusBadge';
 
 /** 날짜 포맷 헬퍼: ISO → YYYY.MM.DD HH:MM */
@@ -80,6 +83,20 @@ export default function UserTable({ selectedUserId, onSelectUser }) {
   /* ── 페이징 상태 ── */
   const [page, setPage] = useState(0);
 
+  /* ── 대량 선택 상태 (P2-1, 2026-04-09 추가) ── */
+  /**
+   * 선택된 사용자 ID 집합.
+   * Set 을 사용하여 O(1) has/add/delete 로 체크박스 토글 성능 확보.
+   * 필터/페이지 변경 시 별도 useEffect 에서 초기화된다.
+   */
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+
+  /**
+   * 대량 작업 진행 중 플래그.
+   * 진행 중에는 체크박스·버튼·목록을 disabled 처리하여 중복 요청을 차단한다.
+   */
+  const [bulkProcessing, setBulkProcessing] = useState(false);
+
   /** 키워드 디바운스 타이머 ref */
   const debounceRef = useRef(null);
 
@@ -107,12 +124,123 @@ export default function UserTable({ selectedUserId, onSelectUser }) {
 
   useEffect(() => { loadUsers(); }, [loadUsers]);
 
+  /**
+   * 필터/페이지 변경 시 대량 선택 초기화.
+   * 서로 다른 조회 결과의 사용자가 혼합 선택되면 혼란을 초래하고,
+   * 페이지 전환 후 "보이지 않는 선택"이 남아있으면 사고 위험이 크다.
+   */
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [page, keyword, statusFilter, roleFilter]);
+
   /** 컴포넌트 언마운트 시 디바운스 타이머 클린업 */
   useEffect(() => {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, []);
+
+  // ──────────────────────────────────────────────
+  // 대량 선택/실행 (P2-1, 2026-04-09 추가)
+  // ──────────────────────────────────────────────
+
+  /**
+   * 개별 행 체크박스 토글.
+   * 행 클릭(상세 패널 열기)과 구분하기 위해 이벤트 전파는 호출 측에서 stopPropagation 처리한다.
+   */
+  function toggleSelectOne(userId) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(userId)) next.delete(userId);
+      else next.add(userId);
+      return next;
+    });
+  }
+
+  /**
+   * 헤더 체크박스 토글 — 현재 페이지의 모든 사용자를 선택 또는 해제한다.
+   * 이미 전부 선택된 상태라면 해제, 하나라도 미선택이면 전체 선택으로 동작한다.
+   * (다른 페이지의 선택은 건드리지 않는다.)
+   */
+  function toggleSelectAll() {
+    setSelectedIds((prev) => {
+      const idsInPage = users.map((u) => u.userId);
+      if (idsInPage.length === 0) return prev;
+      const allSelected = idsInPage.every((id) => prev.has(id));
+      const next = new Set(prev);
+      if (allSelected) {
+        idsInPage.forEach((id) => next.delete(id));
+      } else {
+        idsInPage.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  }
+
+  /** 선택 전체 해제 */
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
+  /**
+   * 대량 작업 실행 — 정지 또는 활성화.
+   *
+   * 백엔드는 현재 bulk endpoint 를 제공하지 않으므로, 클라이언트에서 개별 API 를
+   * {@link Promise.allSettled} 로 병렬 호출한 뒤 성공/실패 건수를 집계하여 안내한다.
+   * 한 건이 실패해도 나머지 요청은 계속되며, 끝난 후 목록을 새로고침하고 선택을 초기화한다.
+   *
+   * @param {'suspend' | 'activate'} action - 실행할 작업 종류
+   */
+  async function runBulk(action) {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+
+    const actionLabel = action === 'suspend' ? '일괄 정지' : '일괄 활성화';
+    // eslint-disable-next-line no-alert
+    const ok = window.confirm(
+      `선택한 ${ids.length}명을 ${actionLabel}하시겠습니까?\n` +
+      (action === 'suspend'
+        ? '※ 사유는 "관리자 일괄 정지"로 기록됩니다. 사유를 세부적으로 남기려면 개별 처리를 사용하세요.'
+        : '※ 잠금(LOCKED) 상태 계정도 활성(ACTIVE)으로 전환됩니다.')
+    );
+    if (!ok) return;
+
+    setBulkProcessing(true);
+    try {
+      // 각 사용자에 대해 단일 API 호출을 병렬 수행
+      const results = await Promise.allSettled(
+        ids.map((userId) => {
+          if (action === 'suspend') {
+            return suspendUser(userId, {
+              reason: '관리자 일괄 정지',
+              durationDays: null, // null → 영구 정지 (운영 판단에 따라 개별 처리 권장)
+            });
+          }
+          return activateUser(userId);
+        })
+      );
+
+      // 결과 집계 — 성공/실패 건수 및 실패 사유 수집
+      const succeeded = results.filter((r) => r.status === 'fulfilled').length;
+      const failed    = results.length - succeeded;
+      const firstError = results.find((r) => r.status === 'rejected');
+
+      let message = `대량 작업 완료\n성공: ${succeeded}건, 실패: ${failed}건`;
+      if (firstError) {
+        message += `\n\n첫 실패 사유: ${firstError.reason?.message ?? '알 수 없음'}`;
+      }
+      // eslint-disable-next-line no-alert
+      alert(message);
+    } catch (err) {
+      // Promise.allSettled 는 reject 하지 않지만, 예외적 네트워크 오류 대비 catch 유지
+      // eslint-disable-next-line no-alert
+      alert(`대량 작업 중 오류 발생: ${err?.message ?? '알 수 없음'}`);
+    } finally {
+      setBulkProcessing(false);
+      clearSelection();
+      loadUsers();
+    }
+  }
 
   /**
    * 키워드 input 변경 핸들러.
@@ -226,11 +354,66 @@ export default function UserTable({ selectedUserId, onSelectUser }) {
       {/* ── 에러 메시지 ── */}
       {error && <ErrorMsg>{error}</ErrorMsg>}
 
+      {/*
+        대량 선택 바 — 하나 이상 선택된 경우에만 표시 (P2-1, 2026-04-09).
+        일괄 정지/일괄 활성화/선택 해제 3개 액션만 제공한다. 세부 사유/기간 입력이
+        필요하면 개별 처리(상세 패널)를 사용하도록 유도한다.
+       */}
+      {selectedIds.size > 0 && (
+        <BulkBar>
+          <BulkInfo>
+            선택 <strong>{selectedIds.size}</strong>명
+          </BulkInfo>
+          <BulkActions>
+            <BulkSuspendButton
+              type="button"
+              onClick={() => runBulk('suspend')}
+              disabled={bulkProcessing}
+              title="선택한 사용자 일괄 정지"
+            >
+              <MdBlock size={16} />
+              일괄 정지
+            </BulkSuspendButton>
+            <BulkActivateButton
+              type="button"
+              onClick={() => runBulk('activate')}
+              disabled={bulkProcessing}
+              title="선택한 사용자 일괄 활성화"
+            >
+              <MdCheckCircle size={16} />
+              일괄 활성화
+            </BulkActivateButton>
+            <BulkCancelButton
+              type="button"
+              onClick={clearSelection}
+              disabled={bulkProcessing}
+              title="선택 해제"
+            >
+              <MdClose size={16} />
+              선택 해제
+            </BulkCancelButton>
+            {bulkProcessing && <BulkStatus>처리 중...</BulkStatus>}
+          </BulkActions>
+        </BulkBar>
+      )}
+
       {/* ── 목록 테이블 ── */}
       <TableWrap>
         <Table>
           <thead>
             <tr>
+              {/*
+                헤더 체크박스 — 현재 페이지의 모든 사용자 일괄 선택/해제.
+                "indeterminate" 상태(일부만 선택)는 ref 로 DOM 속성을 직접 제어한다.
+              */}
+              <Th $w="36px">
+                <HeaderCheckbox
+                  users={users}
+                  selectedIds={selectedIds}
+                  onToggle={toggleSelectAll}
+                  disabled={loading || bulkProcessing || users.length === 0}
+                />
+              </Th>
               <Th $w="32px">
                 <MdPerson size={14} style={{ display: 'block', margin: '0 auto' }} />
               </Th>
@@ -246,19 +429,20 @@ export default function UserTable({ selectedUserId, onSelectUser }) {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={8}>
+                <td colSpan={9}>
                   <CenterCell>불러오는 중...</CenterCell>
                 </td>
               </tr>
             ) : users.length === 0 ? (
               <tr>
-                <td colSpan={8}>
+                <td colSpan={9}>
                   <CenterCell>검색 결과가 없습니다.</CenterCell>
                 </td>
               </tr>
             ) : (
               users.map((user) => {
                 const isSelected = selectedUserId === user.userId;
+                const isChecked  = selectedIds.has(user.userId);
                 const statusInfo = STATUS_BADGE[user.status] ?? { status: 'default', label: user.status ?? '-' };
                 const roleInfo   = ROLE_BADGE[user.userRole] ?? { status: 'default', label: user.userRole ?? '-' };
 
@@ -269,6 +453,16 @@ export default function UserTable({ selectedUserId, onSelectUser }) {
                     onClick={() => handleSelectUser(user.userId)}
                     title="클릭하여 상세 보기"
                   >
+                    {/* 체크박스 칸 — 행 클릭 이벤트와 분리하기 위해 stopPropagation */}
+                    <Td onClick={(e) => e.stopPropagation()}>
+                      <RowCheckbox
+                        type="checkbox"
+                        checked={isChecked}
+                        disabled={bulkProcessing}
+                        onChange={() => toggleSelectOne(user.userId)}
+                        aria-label={`사용자 ${user.userId} 선택`}
+                      />
+                    </Td>
                     {/* 아바타 칸 (이니셜) */}
                     <Td>
                       <Avatar>
@@ -333,6 +527,46 @@ export default function UserTable({ selectedUserId, onSelectUser }) {
         </Pagination>
       )}
     </Container>
+  );
+}
+
+/**
+ * 헤더 체크박스 컴포넌트 — indeterminate(일부 선택) 상태 DOM 제어용 소형 컴포넌트.
+ *
+ * React 는 input 의 {@code indeterminate} 속성을 props 로 직접 세팅할 수 없다 (HTML 표준 외
+ * 속성). 따라서 ref 를 통해 DOM 에 직접 부여해야 한다. UserTable 본체에 섞으면 가독성이
+ * 떨어지므로 작은 헬퍼 컴포넌트로 분리한다.
+ *
+ * @param {Object}   props
+ * @param {Array}    props.users        현재 페이지에 표시된 사용자 목록
+ * @param {Set}      props.selectedIds  선택된 사용자 ID 집합
+ * @param {Function} props.onToggle     토글 콜백
+ * @param {boolean}  props.disabled     비활성화 여부
+ */
+function HeaderCheckbox({ users, selectedIds, onToggle, disabled }) {
+  const ref = useRef(null);
+
+  // users 또는 selectedIds 변경 시 indeterminate 상태를 재계산하여 DOM 에 반영
+  const idsInPage = users.map((u) => u.userId);
+  const checkedCount = idsInPage.filter((id) => selectedIds.has(id)).length;
+  const allChecked = idsInPage.length > 0 && checkedCount === idsInPage.length;
+  const someChecked = checkedCount > 0 && !allChecked;
+
+  useEffect(() => {
+    if (ref.current) {
+      ref.current.indeterminate = someChecked;
+    }
+  }, [someChecked]);
+
+  return (
+    <RowCheckbox
+      type="checkbox"
+      ref={ref}
+      checked={allChecked}
+      disabled={disabled}
+      onChange={onToggle}
+      aria-label="현재 페이지 전체 선택/해제"
+    />
   );
 }
 
@@ -592,4 +826,120 @@ const PageButton = styled.button`
 const PageInfo = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   color: ${({ theme }) => theme.colors.textMuted};
+`;
+
+// ──────────────────────────────────────────────
+// 대량 선택 UI (P2-1, 2026-04-09 추가)
+// ──────────────────────────────────────────────
+
+/**
+ * 대량 선택 바 — 하나 이상 선택된 경우 테이블 상단에 표시.
+ * primary 컬러로 주의를 끌고, 선택된 수/작업 버튼/해제 버튼을 수평 배치.
+ */
+const BulkBar = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: ${({ theme }) => theme.spacing.lg};
+  padding: ${({ theme }) => theme.spacing.md} ${({ theme }) => theme.spacing.lg};
+  margin-bottom: ${({ theme }) => theme.spacing.md};
+  background: ${({ theme }) => theme.colors.primaryLight};
+  border: 1px solid ${({ theme }) => theme.colors.primary};
+  border-radius: 6px;
+`;
+
+/** 선택 건수 표시 텍스트 */
+const BulkInfo = styled.span`
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  color: ${({ theme }) => theme.colors.primary};
+
+  strong {
+    font-size: ${({ theme }) => theme.fontSizes.md};
+    font-weight: ${({ theme }) => theme.fontWeights.bold};
+    margin: 0 ${({ theme }) => theme.spacing.xs};
+  }
+`;
+
+/** 대량 작업 버튼 그룹 */
+const BulkActions = styled.div`
+  display: flex;
+  align-items: center;
+  gap: ${({ theme }) => theme.spacing.sm};
+`;
+
+/** 대량 작업 공통 버튼 스타일 (inline-flex + 아이콘 포함) */
+const BulkButtonBase = styled.button`
+  display: inline-flex;
+  align-items: center;
+  gap: ${({ theme }) => theme.spacing.xs};
+  padding: 6px ${({ theme }) => theme.spacing.lg};
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-weight: ${({ theme }) => theme.fontWeights.medium};
+  border-radius: 4px;
+  transition: all ${({ theme }) => theme.transitions.fast};
+  white-space: nowrap;
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+`;
+
+/** 일괄 정지 버튼 — 위험 액션이므로 error 컬러 */
+const BulkSuspendButton = styled(BulkButtonBase)`
+  color: #ffffff;
+  background: ${({ theme }) => theme.colors.error};
+  border: 1px solid ${({ theme }) => theme.colors.error};
+
+  &:hover:not(:disabled) {
+    opacity: 0.85;
+  }
+`;
+
+/** 일괄 활성화 버튼 — 긍정 액션이므로 primary */
+const BulkActivateButton = styled(BulkButtonBase)`
+  color: #ffffff;
+  background: ${({ theme }) => theme.colors.primary};
+  border: 1px solid ${({ theme }) => theme.colors.primary};
+
+  &:hover:not(:disabled) {
+    opacity: 0.85;
+  }
+`;
+
+/** 선택 해제 버튼 — outline 스타일 (취소 성격) */
+const BulkCancelButton = styled(BulkButtonBase)`
+  color: ${({ theme }) => theme.colors.textSecondary};
+  background: ${({ theme }) => theme.colors.bgCard};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+
+  &:hover:not(:disabled) {
+    background: ${({ theme }) => theme.colors.bgHover};
+    color: ${({ theme }) => theme.colors.textPrimary};
+  }
+`;
+
+/** 처리 중 텍스트 (버튼 비활성과 짝을 이루어 진행 상태를 표시) */
+const BulkStatus = styled.span`
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.primary};
+  font-weight: ${({ theme }) => theme.fontWeights.medium};
+  margin-left: ${({ theme }) => theme.spacing.sm};
+`;
+
+/**
+ * 행/헤더 공통 체크박스.
+ * accent-color 로 브라우저 기본 체크박스 색상을 primary 로 통일한다.
+ * 크기는 16px 고정 — 작은 셀 안에서 클릭 타겟 확보.
+ */
+const RowCheckbox = styled.input`
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: ${({ theme }) => theme.colors.primary};
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
+  }
 `;

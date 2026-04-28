@@ -99,7 +99,9 @@ function attachErrorResponseInterceptor(instance) {
     (error) => {
       const data = error.response?.data;
       const status = error.response?.status;
-      const message = data?.message || data?.detail || getFallbackMessage(status);
+      const raw = data?.message || data?.detail || getFallbackMessage(status);
+      // FastAPI detail 필드는 배열/객체일 수 있으므로 반드시 문자열로 변환
+      const message = typeof raw === 'string' ? raw : (JSON.stringify(raw) ?? getFallbackMessage(status));
       const apiError = new Error(message);
       apiError.code = data?.code || null;
       apiError.status = status || null;

@@ -1,29 +1,56 @@
 /**
  * AI 운영 탭 메인 페이지.
- * 3개 서브탭: AI 트리거 | 생성 이력 | 챗봇 로그.
+ * 5개 서브탭: AI 트리거 | 생성 이력 | 챗봇 로그 | 리뷰 인증 | 채팅 추천 칩.
+ *
+ * 2026-04-14: '리뷰 인증' 서브탭 추가 — 도장깨기 리뷰를 AI 가 "영화 줄거리 ↔ 리뷰 유사도" 로
+ * 판정한 시청 인증 기록을 관리자가 모니터링/오버라이드한다. 에이전트 자체는 추후 개발 예정.
+ * 2026-04-23: '채팅 추천 칩' 서브탭 추가 — 채팅 환영 화면의 추천 질문 칩 DB 풀을
+ * 운영자가 직접 CRUD한다.
+ *
+ * Phase G P1 (2026-04-23):
+ * - ?tab=chat-suggestions 쿼리 시 해당 서브탭 자동 전환 (AI 어시스턴트 딥링크 대응).
  */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import styled from 'styled-components';
+import { useQueryParams } from '@/shared/hooks/useQueryParams';
 import AiTriggerPanel from '../components/AiTriggerPanel';
 import GenerationHistory from '../components/GenerationHistory';
 import ChatLogViewer from '../components/ChatLogViewer';
+import ReviewVerificationTab from '../components/ReviewVerificationTab';
+import ChatSuggestionTab from '../components/ChatSuggestionTab';
 
 /** 서브탭 목록 */
 const TABS = [
-  { key: 'trigger', label: 'AI 트리거' },
-  { key: 'history', label: '생성 이력' },
-  { key: 'chatlog', label: '챗봇 로그' },
+  { key: 'trigger',          label: 'AI 트리거' },
+  { key: 'history',          label: '생성 이력' },
+  { key: 'chatlog',          label: '챗봇 로그' },
+  { key: 'review-verify',    label: '리뷰 인증' },
+  { key: 'chat-suggestions', label: '채팅 추천 칩' },
 ];
 
 export default function AiOpsPage() {
   const [activeTab, setActiveTab] = useState('trigger');
 
+  /* ── URL ?tab= 쿼리로 서브탭 자동 전환 ── */
+  /**
+   * AI 어시스턴트가 /admin/ai?tab=chat-suggestions&modal=create 로 딥링크할 때
+   * 해당 탭을 자동으로 활성화한다. 유효하지 않은 tab 값은 무시한다.
+   */
+  const { tab: queryTab } = useQueryParams();
+  const VALID_TABS = TABS.map((t) => t.key);
+  useEffect(() => {
+    if (queryTab && VALID_TABS.includes(queryTab)) {
+      setActiveTab(queryTab);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryTab]);
+
   return (
     <Wrapper>
       <PageHeader>
         <PageTitle>AI 운영</PageTitle>
-        <PageDesc>퀴즈/리뷰 생성 트리거 및 챗봇 대화 로그를 관리합니다.</PageDesc>
+        <PageDesc>퀴즈/리뷰 생성 트리거, 챗봇 대화 로그, 도장깨기 리뷰 인증, 채팅 추천 칩을 관리합니다.</PageDesc>
       </PageHeader>
 
       {/* 서브탭 네비게이션 */}
@@ -44,6 +71,8 @@ export default function AiOpsPage() {
         {activeTab === 'trigger' && <AiTriggerPanel />}
         {activeTab === 'history' && <GenerationHistory />}
         {activeTab === 'chatlog' && <ChatLogViewer />}
+        {activeTab === 'review-verify' && <ReviewVerificationTab />}
+        {activeTab === 'chat-suggestions' && <ChatSuggestionTab />}
       </TabContent>
     </Wrapper>
   );

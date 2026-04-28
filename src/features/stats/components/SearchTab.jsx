@@ -1,10 +1,16 @@
 /**
  * 검색 분석 탭 컴포넌트.
  *
+ * 2026-04-08 개편:
+ *  - 하단에 "인기 검색어 운영 관리" 섹션(PopularSearchManage) 추가 —
+ *    구 운영 도구 > 인기 검색어 탭을 흡수. 조회(품질 지표/TOP 20)와
+ *    조작(블랙리스트/강제 노출 CRUD)을 한 탭에서 함께 관리한다.
+ *
  * 구성:
  * 1. 기간 선택 버튼 그룹 (7d / 30d)
  * 2. 검색 품질 지표 카드 3개 (성공률, 총 검색 수, 0건 검색 수)
- * 3. 인기 검색어 테이블 (순위, 키워드, 검색 수, 전환율)
+ * 3. 인기 검색어 테이블 (순위, 키워드, 검색 수, 전환율) — 조회 전용
+ * 4. 인기 검색어 운영 관리 (CRUD + 블랙리스트)
  *
  * 데이터 패칭:
  * - Promise.allSettled로 품질 지표 + 인기 검색어 병렬 호출
@@ -22,6 +28,7 @@ import {
 } from 'react-icons/md';
 import StatsCard from '@/shared/components/StatsCard';
 import { fetchPopularKeywords, fetchSearchQuality } from '../api/statsApi';
+import PopularSearchManage from './PopularSearchManage';
 
 /** 기간 선택 옵션 (검색 분석은 7d / 30d 두 가지) */
 const PERIOD_OPTIONS = [
@@ -239,6 +246,10 @@ export default function SearchTab() {
           </Table>
         </TableWrapper>
       </TableCard>
+
+      {/* ── 인기 검색어 운영 관리 (CRUD) ── */}
+      <SectionLabel style={{ marginTop: '48px' }}>인기 검색어 운영 관리</SectionLabel>
+      <PopularSearchManage />
     </Wrapper>
   );
 }

@@ -22,6 +22,11 @@ export function fetchOllamaStatus() {
   return agentApi.get(SYSTEM_ENDPOINTS.OLLAMA);
 }
 
+/** vLLM 모델 상태(Chat/Vision) 조회 (Agent) */
+export function fetchVllmStatus() {
+  return agentApi.get(SYSTEM_ENDPOINTS.VLLM);
+}
+
 /** 현재 설정값 조회 (Backend) */
 export function fetchSystemConfig() {
   return backendApi.get(SYSTEM_ENDPOINTS.CONFIG);

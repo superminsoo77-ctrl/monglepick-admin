@@ -12,17 +12,21 @@ import { MdRefresh, MdReplay, MdChevronLeft, MdChevronRight } from 'react-icons/
 import StatusBadge from '@/shared/components/StatusBadge';
 import { fetchPipelineHistory, retryFailedPipeline } from '../api/dataApi';
 
-/** 작업 한국어 라벨 */
+/** 작업 한국어 라벨.
+ *
+ * 2026-04-15: Agent admin_data.py 의 PIPELINE_TASKS 키와 일치시킴
+ * (PipelineExecutor 의 드롭다운과 동일한 단일 진실 원본).
+ */
 const TASK_LABELS = {
-  full_reload: '전체 재적재',
-  tmdb_collect: 'TMDB 수집',
-  kobis_collect: 'KOBIS 수집',
-  kmdb_collect: 'KMDb 수집',
-  embed_upsert: '임베딩 적재',
-  neo4j_sync: 'Neo4j 동기화',
-  es_index: 'ES 인덱싱',
-  mood_enrich: '무드태그 보강',
-  resume: '중단 재개',
+  full_reload:       '전체 재적재',
+  tmdb_collect:      'TMDB 수집',
+  kaggle_supplement: 'Kaggle 보강',
+  kobis_load:        'KOBIS 적재',
+  kmdb_load:         'KMDb 적재',
+  mood_enrichment:   '무드 태그 보강',
+  es_sync:           'Elasticsearch 동기화',
+  mysql_sync:        'MySQL 동기화',
+  cf_only:           'CF 매트릭스 재구축',
 };
 
 /** 실행 상태 → 뱃지 매핑 */

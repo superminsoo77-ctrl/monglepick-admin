@@ -29,6 +29,7 @@ import {
 import { MdTouchApp, MdThumbUp, MdRecommend } from 'react-icons/md';
 import StatsCard from '@/shared/components/StatsCard';
 import StatusBadge from '@/shared/components/StatusBadge';
+import CsvExportButton from '@/shared/components/CsvExportButton';
 import {
   fetchRecommendation,
   fetchRecommendationDistribution,
@@ -336,9 +337,44 @@ export default function RecommendationTab() {
       <TableCard>
         <TableHeader>
           <ChartTitle>추천 로그</ChartTitle>
-          {!logsLoading && (
-            <TableMeta>총 {fmt(logsTotal)}건</TableMeta>
-          )}
+          <TableHeaderRight>
+            {!logsLoading && (
+              <TableMeta>총 {fmt(logsTotal)}건</TableMeta>
+            )}
+            {/*
+              CSV 다운로드 — 비동기 모드.
+              현재 화면은 15건 페이징만 보여주지만 운영자는 전체 기간 로그가 필요한
+              경우가 많으므로, 클릭 시 size=1000 으로 한 번 더 호출하여 최대 1000건까지
+              내보낸다. 1000건 이상 필요하면 기간을 좁혀야 한다는 운영 규칙을 암묵적으로 유도.
+            */}
+            <CsvExportButton
+              filename={`recommendation_logs_${period}`}
+              columns={[
+                { header: '사용자 ID', accessor: 'userId' },
+                { header: '영화 ID',   accessor: 'movieId' },
+                /* score 는 소수 3자리로 통일 — 테이블 표시와 일치 */
+                { header: '추천 점수', accessor: (row) => row.score != null ? Number(row.score).toFixed(3) : '' },
+                { header: '피드백',    accessor: 'feedback' },
+                { header: '발생 시간', accessor: 'createdAt' },
+              ]}
+              fetchAll={async () => {
+                /* 전체 내보내기 — 최대 1000건 한도 */
+                const data = await fetchRecommendationLogs({ period, page: 0, size: 1000 });
+                return Array.isArray(data?.content)
+                  ? data.content
+                  : Array.isArray(data)
+                    ? data
+                    : [];
+              }}
+              disabled={logsLoading}
+              /*
+                감사 로그 기록 — 추천 로그에는 user_id 가 포함되어 개인정보에 해당하므로
+                CSV 내보내기 시 반드시 admin_audit_logs 에 기록한다. (2026-04-09 P1-2 확장)
+              */
+              auditSource="recommendation_logs"
+              auditFilterInfo={`period=${period}`}
+            />
+          </TableHeaderRight>
         </TableHeader>
         <TableWrapper>
           <Table>
@@ -519,6 +555,16 @@ const TableHeader = styled.div`
   align-items: center;
   justify-content: space-between;
   margin-bottom: ${({ theme }) => theme.spacing.xl};
+`;
+
+/**
+ * 테이블 헤더 우측 영역 — 총 건수 + CSV 다운로드 버튼을 가로 배치.
+ * 2026-04-09 P1-2 추가.
+ */
+const TableHeaderRight = styled.div`
+  display: flex;
+  align-items: center;
+  gap: ${({ theme }) => theme.spacing.md};
 `;
 
 const TableMeta = styled.span`

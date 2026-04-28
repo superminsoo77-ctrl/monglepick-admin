@@ -1,17 +1,27 @@
 /**
  * 데이터 현황 카드 컴포넌트.
- * 5DB 전체 건수, 소스별 분포, 품질 점수 3개를 StatsCard 형태로 표시.
- * fetchDataStats + fetchDataHealth + fetchDataQuality 병렬 호출.
+ * Agent admin_data.py 의 3개 EP 를 병렬 호출하여 요약 카드 + 소스 분포 + 품질 지표를 렌더링한다.
+ *   - GET /admin/data/overview     → 5DB 건수 (MySQL/Qdrant/Neo4j/ES/Redis)
+ *   - GET /admin/data/distribution → 소스별(TMDB/KOBIS/…) 영화 분포
+ *   - GET /admin/data/quality      → NULL 비율 + 중복 타이틀 + 평균 평점
+ *
+ * 2026-04-14 재작성:
+ *   과거 구현은 존재하지 않는 `/data/stats`, `/data/health` 를 호출하고
+ *   `stats.totalMovies`, `health.syncRate`, `quality.average` 같은 없는 필드를 참조해
+ *   "데이터 현황" 탭이 항상 빈 화면이었다. 실제 API 응답 구조에 맞춰 전면 개편.
  *
  * @param {Object} props - 없음 (자체 데이터 fetch)
  */
 
 import { useState, useEffect, useCallback } from 'react';
 import styled from 'styled-components';
-import { MdRefresh, MdStorage, MdVerified, MdSpeed } from 'react-icons/md';
+import {
+  MdRefresh, MdStorage, MdVerified, MdSpeed,
+  MdCloudQueue, MdAccountTree, MdSearch, MdMemory,
+} from 'react-icons/md';
 import StatsCard from '@/shared/components/StatsCard';
 import StatusBadge from '@/shared/components/StatusBadge';
-import { fetchDataStats, fetchDataHealth, fetchDataQuality } from '../api/dataApi';
+import { fetchDataOverview, fetchDataDistribution, fetchDataQuality } from '../api/dataApi';
 
 /** 소스 한국어 라벨 매핑 */
 const SOURCE_LABELS = {
@@ -20,41 +30,59 @@ const SOURCE_LABELS = {
   kmdb: 'KMDb',
   kaggle: 'Kaggle',
   manual: '수동 등록',
+  admin: '관리자 등록',
+  unknown: '미지정',
 };
 
-/** 품질 점수 색상 기준 */
-function getQualityStatus(score) {
-  if (score >= 90) return 'success';
-  if (score >= 70) return 'warning';
+/** NULL 비율 라벨 */
+const NULL_RATE_LABELS = {
+  overview: '줄거리',
+  genres: '장르',
+  posterPath: '포스터',
+  director: '감독',
+};
+
+/** NULL 비율에 따른 상태(낮을수록 좋음) */
+function getNullRateStatus(ratio) {
+  if (ratio == null) return 'default';
+  if (ratio <= 5) return 'success';
+  if (ratio <= 20) return 'warning';
   return 'error';
 }
 
+/** 숫자 안전 포맷 (null/undefined → '-') */
+function fmtNum(n) {
+  if (n == null) return '-';
+  return Number(n).toLocaleString();
+}
+
 export default function DataStatsCard() {
-  const [stats, setStats] = useState(null);
-  const [health, setHealth] = useState(null);
+  // 3개 EP 응답 상태 — 각각 overview/distribution/quality
+  const [overview, setOverview] = useState(null);
+  const [distribution, setDistribution] = useState(null);
   const [quality, setQuality] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  /** 3개 API 병렬 조회 */
+  /** 3개 API 병렬 조회 (`Promise.allSettled` — 일부 실패해도 나머지 렌더) */
   const loadAll = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [statsRes, healthRes, qualityRes] = await Promise.allSettled([
-        fetchDataStats(),
-        fetchDataHealth(),
+      const [ovRes, distRes, qRes] = await Promise.allSettled([
+        fetchDataOverview(),
+        fetchDataDistribution(),
         fetchDataQuality(),
       ]);
-      if (statsRes.status === 'fulfilled') setStats(statsRes.value);
-      if (healthRes.status === 'fulfilled') setHealth(healthRes.value);
-      if (qualityRes.status === 'fulfilled') setQuality(qualityRes.value);
+      if (ovRes.status === 'fulfilled') setOverview(ovRes.value);
+      if (distRes.status === 'fulfilled') setDistribution(distRes.value);
+      if (qRes.status === 'fulfilled') setQuality(qRes.value);
 
-      // 모두 실패한 경우만 에러 표시
+      // 모두 실패한 경우만 전체 에러 표기
       if (
-        statsRes.status === 'rejected' &&
-        healthRes.status === 'rejected' &&
-        qualityRes.status === 'rejected'
+        ovRes.status === 'rejected' &&
+        distRes.status === 'rejected' &&
+        qRes.status === 'rejected'
       ) {
         setError('데이터를 불러올 수 없습니다.');
       }
@@ -67,10 +95,16 @@ export default function DataStatsCard() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
-  /** 전체 영화 건수 포맷 */
-  const totalMovies = stats?.totalMovies != null
-    ? stats.totalMovies.toLocaleString() + '건'
-    : '-';
+  // Overview 각 DB 요약 (각 블록은 error 일 수 있음)
+  const mysql = overview?.mysql;
+  const qdrant = overview?.qdrant;
+  const neo4j = overview?.neo4j;
+  const es = overview?.elasticsearch;
+  const redis = overview?.redis;
+
+  // 품질 지표에서 NULL 비율 리스트 생성
+  const nullRates = quality?.nullRates ?? {};
+  const nullRateEntries = Object.entries(nullRates); // [[key, {count, ratio}], ...]
 
   return (
     <Section>
@@ -83,42 +117,60 @@ export default function DataStatsCard() {
 
       {error && <ErrorMsg>{error}</ErrorMsg>}
 
-      {/* 상단: 요약 StatsCard 3개 */}
+      {/* 상단: 5DB 건수 카드 (MySQL 기준 영화 수 / 총 벡터 / 그래프 / 문서 / 캐시) */}
       <StatsRow>
         <StatsCard
           icon={<MdStorage />}
-          title="전체 영화 수"
-          value={totalMovies}
-          subtitle={stats?.lastUpdated ? `최종 갱신: ${new Date(stats.lastUpdated).toLocaleDateString('ko-KR')}` : ''}
-          status="info"
+          title="MySQL 영화"
+          value={mysql?.error ? '-' : fmtNum(mysql?.movieCount) + '건'}
+          subtitle={mysql?.error ? mysql.error : `유저 ${fmtNum(mysql?.userCount)}명`}
+          status={mysql?.error ? 'error' : 'info'}
         />
         <StatsCard
-          icon={<MdVerified />}
-          title="5DB 동기화 상태"
-          value={health?.syncRate != null ? `${health.syncRate}%` : '-'}
-          subtitle={health?.status === 'ok' ? '정상 동기화' : (health?.status ?? '확인 중')}
-          status={health?.status === 'ok' ? 'success' : 'warning'}
+          icon={<MdCloudQueue />}
+          title="Qdrant 벡터"
+          value={qdrant?.error ? '-' : fmtNum(qdrant?.vectorCount)}
+          subtitle={qdrant?.error ? qdrant.error : `${qdrant?.collection ?? '-'} / ${qdrant?.vectorSize ?? '?'}d`}
+          status={qdrant?.error ? 'error' : 'info'}
         />
         <StatsCard
-          icon={<MdSpeed />}
-          title="평균 데이터 품질"
-          value={quality?.average != null ? `${quality.average}점` : '-'}
-          subtitle="정확도·완결성·일관성 평균"
-          status={quality?.average != null ? getQualityStatus(quality.average) : 'default'}
+          icon={<MdAccountTree />}
+          title="Neo4j 그래프"
+          value={neo4j?.error ? '-' : fmtNum(neo4j?.nodeCount) + ' 노드'}
+          subtitle={neo4j?.error ? neo4j.error : `관계 ${fmtNum(neo4j?.relationshipCount)}개`}
+          status={neo4j?.error ? 'error' : 'info'}
+        />
+        <StatsCard
+          icon={<MdSearch />}
+          title="Elasticsearch"
+          value={es?.error ? '-' : fmtNum(es?.documentCount) + ' 문서'}
+          subtitle={es?.error ? es.error : `${es?.indexName ?? '-'} / ${es?.indexSizeMB ?? 0}MB`}
+          status={es?.error ? 'error' : 'info'}
+        />
+        <StatsCard
+          icon={<MdMemory />}
+          title="Redis 키"
+          value={redis?.error ? '-' : fmtNum(redis?.keyCount)}
+          subtitle={redis?.error ? redis.error : '캐시 키 개수'}
+          status={redis?.error ? 'error' : 'info'}
         />
       </StatsRow>
 
       {/* 중단: 소스별 분포 */}
-      {stats?.bySource && (
+      {distribution?.distribution?.length > 0 && (
         <SubSection>
-          <SubTitle>소스별 분포</SubTitle>
+          <SubTitle>
+            소스별 분포
+            <TotalHint>(총 {fmtNum(distribution.total)}건)</TotalHint>
+          </SubTitle>
           <SourceGrid>
-            {Object.entries(stats.bySource).map(([key, count]) => (
-              <SourceCard key={key}>
-                <SourceLabel>{SOURCE_LABELS[key] || key}</SourceLabel>
-                <SourceCount>{count.toLocaleString()}</SourceCount>
+            {distribution.distribution.map((item) => (
+              <SourceCard key={item.source}>
+                <SourceLabel>{SOURCE_LABELS[item.source] || item.source}</SourceLabel>
+                <SourceCount>{fmtNum(item.count)}</SourceCount>
+                <SourceRatio>{item.percentage?.toFixed(1) ?? '0.0'}%</SourceRatio>
                 <SourceBar
-                  $ratio={stats.totalMovies > 0 ? count / stats.totalMovies : 0}
+                  $ratio={distribution.total > 0 ? item.count / distribution.total : 0}
                 />
               </SourceCard>
             ))}
@@ -126,32 +178,47 @@ export default function DataStatsCard() {
         </SubSection>
       )}
 
-      {/* 하단: 품질 점수 상세 */}
-      {quality && (
+      {/* 하단: 품질 지표 — NULL 비율 + 중복 + 평균 평점 */}
+      {quality && !quality.error && (
         <SubSection>
-          <SubTitle>품질 점수 상세</SubTitle>
+          <SubTitle>
+            데이터 품질
+            <TotalHint>
+              (전체 {fmtNum(quality.totalMovies)}건 · 중복 제목 {fmtNum(quality.duplicateTitles)}건
+              {' · '}평균 평점 {quality.averageRating ?? '-'})
+            </TotalHint>
+          </SubTitle>
           <QualityRow>
-            {[
-              { key: 'accuracy', label: '정확도' },
-              { key: 'completeness', label: '완결성' },
-              { key: 'consistency', label: '일관성' },
-            ].map(({ key, label }) => {
-              const score = quality[key];
+            {nullRateEntries.map(([key, info]) => {
+              const status = getNullRateStatus(info?.ratio);
               return (
                 <QualityItem key={key}>
-                  <QualityLabel>{label}</QualityLabel>
-                  <QualityScore $status={score != null ? getQualityStatus(score) : 'default'}>
-                    {score != null ? score : '-'}
+                  <QualityLabel>{NULL_RATE_LABELS[key] ?? key} NULL 비율</QualityLabel>
+                  <QualityScore $status={status}>
+                    {info?.ratio != null ? `${info.ratio}%` : '-'}
                   </QualityScore>
+                  <QualitySub>누락 {fmtNum(info?.count)}건</QualitySub>
                   <StatusBadge
-                    status={score != null ? getQualityStatus(score) : 'default'}
-                    label={score != null ? (score >= 90 ? '우수' : score >= 70 ? '보통' : '미흡') : '확인 중'}
+                    status={status}
+                    label={
+                      status === 'success' ? '양호' :
+                      status === 'warning' ? '주의' :
+                      status === 'error' ? '미흡' : '확인 중'
+                    }
                   />
                 </QualityItem>
               );
             })}
           </QualityRow>
         </SubSection>
+      )}
+
+      {/* 마지막 확인 시각 */}
+      {overview?.checkedAt && (
+        <CheckedAt>
+          <MdVerified size={14} />
+          마지막 확인: {new Date(overview.checkedAt).toLocaleString('ko-KR')}
+        </CheckedAt>
       )}
     </Section>
   );
@@ -196,13 +263,17 @@ const ErrorMsg = styled.p`
   margin-bottom: ${({ theme }) => theme.spacing.lg};
 `;
 
+/* 상단 5DB 카드 — 5열 그리드 (좁아지면 자동 줄바꿈) */
 const StatsRow = styled.div`
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: ${({ theme }) => theme.spacing.lg};
   margin-bottom: ${({ theme }) => theme.spacing.xl};
 
-  @media (max-width: 900px) {
+  @media (max-width: 1280px) {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  @media (max-width: 768px) {
     grid-template-columns: 1fr;
   }
 `;
@@ -216,6 +287,15 @@ const SubTitle = styled.h4`
   font-weight: ${({ theme }) => theme.fontWeights.semibold};
   color: ${({ theme }) => theme.colors.textSecondary};
   margin-bottom: ${({ theme }) => theme.spacing.md};
+  display: flex;
+  align-items: baseline;
+  gap: ${({ theme }) => theme.spacing.sm};
+`;
+
+const TotalHint = styled.span`
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textMuted};
+  font-weight: ${({ theme }) => theme.fontWeights.normal};
 `;
 
 const SourceGrid = styled.div`
@@ -242,8 +322,14 @@ const SourceCount = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xl};
   font-weight: ${({ theme }) => theme.fontWeights.bold};
   color: ${({ theme }) => theme.colors.textPrimary};
-  margin-bottom: ${({ theme }) => theme.spacing.sm};
+  margin-bottom: ${({ theme }) => theme.spacing.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
+`;
+
+const SourceRatio = styled.div`
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  margin-bottom: ${({ theme }) => theme.spacing.sm};
 `;
 
 const SourceBar = styled.div`
@@ -257,10 +343,13 @@ const SourceBar = styled.div`
 
 const QualityRow = styled.div`
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: ${({ theme }) => theme.spacing.lg};
 
-  @media (max-width: 768px) {
+  @media (max-width: 900px) {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  @media (max-width: 480px) {
     grid-template-columns: 1fr;
   }
 `;
@@ -290,4 +379,18 @@ const QualityScore = styled.div`
     $status === 'error' ? theme.colors.error :
     $status === 'warning' ? theme.colors.warning :
     theme.colors.textPrimary};
+`;
+
+const QualitySub = styled.div`
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textMuted};
+`;
+
+const CheckedAt = styled.p`
+  display: flex;
+  align-items: center;
+  gap: ${({ theme }) => theme.spacing.xs};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textMuted};
+  margin-top: ${({ theme }) => theme.spacing.md};
 `;
